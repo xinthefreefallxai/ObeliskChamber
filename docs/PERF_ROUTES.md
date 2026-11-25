@@ -76,7 +76,9 @@ The walk starts at the recording's first stick step (half a second before it; `-
 the recording's menu presses with your own steps, for a PC whose title needs other presses (with `[fefw] title_continue` on, the cursor
 already sits on Continue: no DOWN). `--shots 10` adds a screenshot every 10 s of the walk (`walk_000.png` ...) to check where the
 character went; leave it off for timing runs, since a screenshot costs a frame. `@loaded` needs `[display] unpaced_loading` on (the
-default): that is what tells a loading screen apart.
+default): that is what tells a loading screen apart. Add `draws=100` (`@loaded 2000 draws=100`) to also wait for a frame of the area
+itself: a slow load can stop for a while on a loading tip that presents steadily, which the replay paces like a menu, and the quiet time
+alone can end there (on the laptop this happened when the title screen came up with its heavier background).
 
 The menus of a recorded route depend on load times staying about the same: keep the same save, cache and settings, and leave a few
 seconds of margin before each press in the recording (don't rush through the menus).

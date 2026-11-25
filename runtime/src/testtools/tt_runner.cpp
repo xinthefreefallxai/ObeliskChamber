@@ -368,16 +368,22 @@ void Runner::frame(uint64_t k, const GameState& s, bool valid, ::Ctx* c) {
                 const nxrt::LoadInfo li = nxrt::load_info();
                 const uint64_t since = start_ms_ > 5000 ? start_ms_ - 5000 : 0;   // the press before this step may have started the load
                 const bool began = li.starts && li.last_start_ms >= since;
-                const bool met = began && !li.loading && li.last_end_ms && static_cast<double>(now_ms - li.last_end_ms) >= st.x;
+                const bool settled = began && !li.loading && li.last_end_ms && static_cast<double>(now_ms - li.last_end_ms) >= st.x;
+                // draws=<n>: also wait for a frame of the area itself. A loading tip that presents steadily between two parts of a load
+                // is not a loading screen to the replay (it is paced), so after a slow first part the quiet time alone can end on it.
+                const bool met = settled && static_cast<double>(li.last_draws) >= st.y;
                 if (met) {
-                    NXLOG_I("script", "line %d: loaded (%llu ms after this step began, quiet for %.0f ms)", st.line,
-                            static_cast<unsigned long long>(now_ms - start_ms_), st.x);
+                    NXLOG_I("script", "line %d: loaded (%llu ms after this step began, quiet for %.0f ms, %u draws a frame)", st.line,
+                            static_cast<unsigned long long>(now_ms - start_ms_), st.x, li.last_draws);
                     advance();
                     continue;
                 }
                 const int64_t to_ms = st.timeout < 0 ? 180000 : st.timeout;
                 if (to_ms > 0 && static_cast<int64_t>(now_ms - start_ms_) >= to_ms) {
-                    fail(st, began ? "timeout: the load did not settle" : "timeout: no load began (is [display] unpaced_loading off?)");
+                    fail(st, !began    ? "timeout: no load began (is [display] unpaced_loading off?)"
+                             : settled ? "timeout: the load settled but frames stayed under draws=" + std::to_string(static_cast<long long>(st.y)) +
+                                             " (" + std::to_string(li.last_draws) + " draws a frame)"
+                                       : "timeout: the load did not settle");
                     return;
                 }
                 return;

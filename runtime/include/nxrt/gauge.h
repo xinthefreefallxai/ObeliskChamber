@@ -125,8 +125,11 @@ struct LoadInfo {
     uint64_t starts = 0;            // loads seen so far
     uint64_t last_start_ms = 0;
     uint64_t last_end_ms = 0;
+    uint32_t last_draws = 0;        // draws of the last presented frame (a loading tip or menu has a few dozen, an area hundreds)
 };
 void note_loading(bool loading);
+// The draws of each presented frame, from the same place (for `@loaded draws=<n>`). Any thread, lock-free.
+void note_frame_draws(uint32_t draws);
 LoadInfo load_info();
 // A measurement window ("scene") over the presented frames: begin notes where it starts, end logs one line for exactly the frames between
 // (hitch: scene '<label>': frames, seconds, mean fps, 1% low, worst, frames over 25 and 50 ms, over 2x the median; render thread ms per

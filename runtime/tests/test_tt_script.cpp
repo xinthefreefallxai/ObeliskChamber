@@ -610,8 +610,14 @@ NXTEST(gameplay_steps_sleep_run_mash_give_rate) {
 
 NXTEST(loaded_and_origin_parse) {
     Script sc;
-    REQUIRE(parse_ok("@loaded\n@loaded 3000 timeout=90000\n@origin\n@at 1500\n", sc));
-    REQUIRE(sc.steps.size() == 4);
+    REQUIRE(parse_ok("@loaded\n@loaded 3000 timeout=90000\n@origin\n@at 1500\n@loaded 2000 draws=100\n@loaded draws=50 timeout=1000\n", sc));
+    REQUIRE(sc.steps.size() == 6);
+    CHECK_EQ(sc.steps[0].y, 0.0);
+    CHECK_EQ(sc.steps[4].x, 2000.0);
+    CHECK_EQ(sc.steps[4].y, 100.0);
+    CHECK_EQ(sc.steps[5].x, 2000.0);
+    CHECK_EQ(sc.steps[5].y, 50.0);
+    CHECK_EQ(sc.steps[5].timeout, (int64_t)1000);
     CHECK_EQ(sc.steps[0].kind, StepKind::WaitLoaded);
     CHECK_EQ(sc.steps[0].x, 2000.0);
     CHECK_EQ(sc.steps[0].timeout, (int64_t)-1);
@@ -621,6 +627,8 @@ NXTEST(loaded_and_origin_parse) {
     CHECK_EQ(sc.steps[3].kind, StepKind::WaitAt);
     expect_err("@loaded 1 2\n", 1, "@loaded");
     expect_err("@loaded -5\n", 1, "quiet ms");
+    expect_err("@loaded draws=x\n", 1, "");
+    expect_err("@loaded 1 2 draws=5\n", 1, "@loaded");
     expect_err("@origin now\n", 1, "@origin");
 }
 

@@ -6472,6 +6472,7 @@ void note_frame_for_pacing() {
     const uint64_t per = (d - last_d) / (p - last_p);
     last_p = p;
     last_d = d;
+    nxrt::note_frame_draws(static_cast<uint32_t>(std::min<uint64_t>(per, UINT32_MAX)));   // for a scripted run's @loaded draws=<n>
     if (last_present == clk::time_point{} || now - last_present > std::chrono::milliseconds(100)) last_stall = now;
     last_present = now;
     low = per < 16 ? low + 1 : 0;

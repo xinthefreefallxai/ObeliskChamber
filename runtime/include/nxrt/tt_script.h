@@ -36,10 +36,13 @@
 //                                     itself stays real, so areas load at full speed
 //   @at <ms>                          wait until <ms> of host wall-clock time have passed since the script's first frame (an absolute time:
 //                                     a recorded route's steps keep their times however many waits came before; tools/perf/record_to_route.py)
-//   @loaded [<quiet_ms>] [timeout=<ms>]   wait until a load that began at most 5 s before this step has ended and <quiet_ms> (default 2000) of
-//                                     host time have passed with no load (loads come in bursts: the save's area, then its pieces). Loads are
-//                                     the replay's loading screens (nxrt/gauge.h load_info; [display] unpaced_loading must be on). Timeout in
-//                                     host ms, default 180000. A recorded route's gameplay follows it, not a fixed time (tools/perf/sync_route.py)
+//   @loaded [<quiet_ms>] [draws=<n>] [timeout=<ms>]   wait until a load that began at most 5 s before this step has ended and <quiet_ms>
+//                                     (default 2000) of host time have passed with no load (loads come in bursts: the save's area, then its
+//                                     pieces). Loads are the replay's loading screens (nxrt/gauge.h load_info; [display] unpaced_loading must
+//                                     be on). draws=<n> (default 0: any): also until a presented frame has at least n draws, so a loading tip
+//                                     shown steadily between two parts of a slow load is not taken for the area (Fortune's Weave: tips and
+//                                     menus draw under 40, areas several hundred; 100 is safe). Timeout in host ms, default 180000. A recorded
+//                                     route's gameplay follows it, not a fixed time (tools/perf/sync_route.py)
 //   @origin                           later @at times count from here instead of the script's first frame
 //   @sleep <ms>                       wait <ms> of host wall-clock time (not game time: loading and fade-outs run on the host clock even in
 //                                     deterministic mode); frames keep being delivered meanwhile

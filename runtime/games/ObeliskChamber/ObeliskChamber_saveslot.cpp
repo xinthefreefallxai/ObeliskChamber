@@ -627,6 +627,7 @@ uint32_t load_direct(::Ctx* c, int i, const std::string& slot) {
     }
     g_load_armed = -1;
     if (!rd(g_base + kMainSeq, &seq) || !seq || !mem::is_mapped(seq + 0x98, 4)) return kPickRefused;
+    optmenu_release_help();
     load_now(c, slot, root, seq);
     return kPickNothing;
 }
@@ -673,6 +674,7 @@ void prompt_yes(::Ctx* c) {
     // On the world map the load the game just asked for waited until the slot list was closed by hand (seen on a PC): close it here.
     if (from_list) {
         const uint64_t answer = c->x[0];
+        optmenu_release_help();
         optmenu_close_list(c);
         c->x[0] = answer;
     }

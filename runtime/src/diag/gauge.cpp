@@ -584,7 +584,9 @@ double hitch_phase_total_ms(int phase) {
 namespace {
 std::atomic<bool> g_loading{false};
 std::atomic<uint64_t> g_load_starts{0}, g_load_start_ms{0}, g_load_end_ms{0};
+std::atomic<uint32_t> g_last_draws{0};
 }  // namespace
+void note_frame_draws(uint32_t draws) { g_last_draws.store(draws, std::memory_order_relaxed); }
 void note_loading(bool loading) {
     const uint64_t now = GetTickCount64();
     if (loading) {
@@ -601,6 +603,7 @@ LoadInfo load_info() {
     li.starts = g_load_starts.load(std::memory_order_relaxed);
     li.last_start_ms = g_load_start_ms.load(std::memory_order_relaxed);
     li.last_end_ms = g_load_end_ms.load(std::memory_order_relaxed);
+    li.last_draws = g_last_draws.load(std::memory_order_relaxed);
     return li;
 }
 

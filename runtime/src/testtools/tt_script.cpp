@@ -625,11 +625,22 @@ bool parse_stmt(const std::string& body, const std::vector<std::string>& t, cons
         std::vector<std::string> pos;
         int64_t timeout = -1;
         if (!take_timeout(t, 1, pos, &timeout, msg)) return false;
-        if (pos.size() > 1) return usage(msg, "@loaded [<quiet_ms>] [timeout=<ms>]");
         Step s = make(StepKind::WaitLoaded);
         s.x = 2000.0;
-        if (pos.size() == 1 && !real_arg(pos[0], &s.x, msg)) return false;
-        if (s.x < 0.0) return fail_with(msg, "@loaded quiet ms must be >= 0, got '" + pos[0] + "'");
+        s.y = 0.0;   // draws=<n>: 0 = any frame
+        std::vector<std::string> rest;
+        for (const std::string& a : pos) {
+            if (lower(a).rfind("draws=", 0) == 0) {
+                int64_t d = 0;
+                if (!count_arg(a.substr(6), &d, msg)) return false;
+                s.y = static_cast<double>(d);
+            } else {
+                rest.push_back(a);
+            }
+        }
+        if (rest.size() > 1) return usage(msg, "@loaded [<quiet_ms>] [draws=<n>] [timeout=<ms>]");
+        if (rest.size() == 1 && !real_arg(rest[0], &s.x, msg)) return false;
+        if (s.x < 0.0) return fail_with(msg, "@loaded quiet ms must be >= 0, got '" + rest[0] + "'");
         s.timeout = timeout;
         out.push_back(s);
         return true;
