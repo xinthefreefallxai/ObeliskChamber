@@ -255,10 +255,20 @@ void write_shm(State& s) {
     const uint8_t ac = s.auto_correction ? 1 : 0;
     lifo_write(b, kOffAutoCorr, kPadAutoCorr, &ac, 1);
 
+    // The SDK's steady clock reads only this (nn::time::detail::SharedMemoryClient::GetStandardSteadyClockCurrentTimePoint, sdk
+    // 0x5d8900, and CalculateSystemClockCurrentTime, 0x5d8a60): with raw = the tick in ns, correction = ((raw - clock_offset) *
+    // multiplier >> divisor_log2) + ctx.offset, clamped at ctx.time_point (from above for a multiplier >= 0, from below otherwise), and
+    // steady = raw + correction. A constant correction (multiplier 0, both bounds the same) makes that the steady time the service uses
+    // (steady_total_ns: raw - tick0 + the epoch + the offsets). It used to be clock_offset tick0, multiplier 1 and a bound of 0, which
+    // clamped the correction to 0: the SDK's steady time was the raw tick, the PC's uptime, and every system clock it worked out (save
+    // dates) was ahead by the uptime at start-up minus the one-hour epoch (issue #221).
+    const int64_t corr = static_cast<int64_t>(kSteadyEpochNs) + s.internal_ns + s.test_ns - static_cast<int64_t>(s.tick0_ns);
     Adjust adj{};
     adj.clock_offset = s.tick0_ns;
-    adj.multiplier = 1;
+    adj.multiplier = 0;
     adj.divisor_log2 = 0;
+    adj.ctx.offset = corr;       // the correction's start
+    adj.ctx.time_point = corr;   // and its bound
     std::memcpy(adj.ctx.source, kSourceId, 16);
     lifo_write(b, kOffAdjust, kPadAdjust, &adj, sizeof adj);
 }
