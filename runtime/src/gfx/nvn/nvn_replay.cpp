@@ -6458,9 +6458,10 @@ void load_census(CensusEvent ev, uint64_t present) {
 // presented frame. Loading = presented frames with fewer than 16 draws (boot's black screen draws 3: exposure, bloom, tone map; the
 // loading screen a few more) AND the game still stalling: a present gap over 100 ms in the last 1.5 s. A light screen that presents
 // steadily (the title screen, a menu) is paced again within 1.5 s, so it does not run at 1000 fps; so is any frame with 16+ draws.
-// [display] loading_draws (default 16) is that draw count: the loading-tip screens the game shows between the loading screens of one
-// load draw 34-36, so with it at 64 they count as loading too while the game stalls (the limiter held them to 60 fps, and the game's
-// loading code advances once a frame). Still paced: the same light screens once the game presents steadily for 1.5 s.
+// [display] loading_draws (default 16): frames with 16 up to this many draws count as loading too, but only inside a load: while the
+// limiter is already unpaced or within 2 s of a frame under 16 draws. The loading-tip screens the game shows between the loading
+// screens of one load draw 34-36: at 64 they are unpaced while the game stalls (at 16 the limiter held them to 60 fps, and the game's
+// loading code advances once a frame). A menu, dialog or title screen that stalls on its own (no loading screen) stays paced.
 void note_frame_for_pacing() {
     static const bool on = nxrt::config_get_bool("display", "unpaced_loading", true);
     if (!on) return;
@@ -6468,7 +6469,7 @@ void note_frame_for_pacing() {
     using clk = std::chrono::steady_clock;
     static uint64_t last_p = 0, last_d = 0;
     static int low = 0;
-    static clk::time_point last_present{}, last_stall{};
+    static clk::time_point last_present{}, last_stall{}, last_dark{};   // last_dark: the last frame under 16 draws
     const uint64_t p = counters().presents.load(std::memory_order_relaxed);
     if (p == last_p) return;
     const auto now = clk::now();
@@ -6479,8 +6480,11 @@ void note_frame_for_pacing() {
     nxrt::note_frame_draws(static_cast<uint32_t>(std::min<uint64_t>(per, UINT32_MAX)));   // for a scripted run's @loaded draws=<n>
     if (last_present == clk::time_point{} || now - last_present > std::chrono::milliseconds(100)) last_stall = now;
     last_present = now;
-    low = per < light ? low + 1 : 0;
-    nxrt::note_load_frame(per < light, last_stall == now);   // the load breakdown: where a load starts and its last stall
+    if (per < 16) last_dark = now;
+    const bool in_load = nxrt::frame_limiter_unpaced() || (last_dark != clk::time_point{} && now - last_dark < std::chrono::seconds(2));
+    const bool light_frame = per < 16 || (per < light && in_load);
+    low = light_frame ? low + 1 : 0;
+    nxrt::note_load_frame(light_frame, last_stall == now);   // the load breakdown: where a load starts and its last stall
     const bool want = low >= 3 && now - last_stall < std::chrono::milliseconds(1500);
     if (want != nxrt::frame_limiter_unpaced()) {
         nxrt::frame_limiter_set_unpaced(want);

@@ -370,7 +370,8 @@ void Runner::frame(uint64_t k, const GameState& s, bool valid, ::Ctx* c) {
                 const bool began = li.starts && li.last_start_ms >= since;
                 const bool settled = began && !li.loading && li.last_end_ms && static_cast<double>(now_ms - li.last_end_ms) >= st.x;
                 // draws=<n>: also wait for a frame of the area itself. A loading tip that presents steadily between two parts of a load
-                // is not a loading screen to the replay (it is paced), so after a slow first part the quiet time alone can end on it.
+                // is not a loading screen to the replay at the default [display] loading_draws (it is paced), so after a slow first part
+                // the quiet time alone can end on it.
                 const bool met = settled && static_cast<double>(li.last_draws) >= st.y;
                 if (met) {
                     NXLOG_I("script", "line %d: loaded (%llu ms after this step began, quiet for %.0f ms, %u draws a frame)", st.line,
