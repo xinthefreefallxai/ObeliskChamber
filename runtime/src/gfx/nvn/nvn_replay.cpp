@@ -6458,9 +6458,13 @@ void load_census(CensusEvent ev, uint64_t present) {
 // presented frame. Loading = presented frames with fewer than 16 draws (boot's black screen draws 3: exposure, bloom, tone map; the
 // loading screen a few more) AND the game still stalling: a present gap over 100 ms in the last 1.5 s. A light screen that presents
 // steadily (the title screen, a menu) is paced again within 1.5 s, so it does not run at 1000 fps; so is any frame with 16+ draws.
+// [display] loading_draws (default 16) is that draw count: the loading-tip screens the game shows between the loading screens of one
+// load draw 34-36, so with it at 64 they count as loading too while the game stalls (the limiter held them to 60 fps, and the game's
+// loading code advances once a frame). Still paced: the same light screens once the game presents steadily for 1.5 s.
 void note_frame_for_pacing() {
     static const bool on = nxrt::config_get_bool("display", "unpaced_loading", true);
     if (!on) return;
+    static const uint64_t light = static_cast<uint64_t>(std::clamp<int64_t>(nxrt::config_get_int("display", "loading_draws", 16), 2, 1000));
     using clk = std::chrono::steady_clock;
     static uint64_t last_p = 0, last_d = 0;
     static int low = 0;
@@ -6475,8 +6479,8 @@ void note_frame_for_pacing() {
     nxrt::note_frame_draws(static_cast<uint32_t>(std::min<uint64_t>(per, UINT32_MAX)));   // for a scripted run's @loaded draws=<n>
     if (last_present == clk::time_point{} || now - last_present > std::chrono::milliseconds(100)) last_stall = now;
     last_present = now;
-    low = per < 16 ? low + 1 : 0;
-    nxrt::note_load_frame(per < 16, last_stall == now);   // the load breakdown: where a load starts and its last stall
+    low = per < light ? low + 1 : 0;
+    nxrt::note_load_frame(per < light, last_stall == now);   // the load breakdown: where a load starts and its last stall
     const bool want = low >= 3 && now - last_stall < std::chrono::milliseconds(1500);
     if (want != nxrt::frame_limiter_unpaced()) {
         nxrt::frame_limiter_set_unpaced(want);
