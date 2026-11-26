@@ -17,6 +17,10 @@
 #include <algorithm>
 #include <cctype>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <thread>
 #include <functional>
 #include <cstdio>
 #include <map>
@@ -175,6 +179,101 @@ bool lazy_commit_granules_locked(uint64_t p0, uint64_t p1) {
     return lazy_commit_locked(p0 & ~(kGranPages - 1), (p1 + kGranPages - 1) & ~(kGranPages - 1));
 }
 
+// [memory] heap_pretouch (off by default; #231): the game's first touch of a lazily committed granule commits all of its 2 MiB, but each
+// 4 KiB page of it still takes Windows' demand-zero fault when the game first writes it, on the game's thread (about 78% of a big area
+// load's faults land in the heap: zstd output, memset, memcpy). A background thread reads every page of the granule right after the
+// commit, so Windows makes those pages while the game is still on the first ones. 2 also commits the next granule (if still lazy) and
+// reads it, so the game's first touch there takes neither the commit nor the faults. ReadProcessMemory does the reads: a page the
+// game decommits or a heap that goes away meanwhile makes it fail, not fault. Reading a page adds it to RAM; at most the granule
+// rounding (2 MiB) per granule the game touched, plus one granule ahead with 2.
+int g_pretouch = 0;
+constexpr uint64_t kGranule = 2ull << 20;
+// Never destroyed, like the thread: the worker can still wait on them while ExitProcess runs static destructors.
+struct Pretouch {
+    std::mutex mu;
+    std::condition_variable cv;
+    std::deque<std::pair<uint64_t, uint64_t>> q;   // [address, bytes)
+    bool stop = false;
+};
+Pretouch& pt() {
+    static Pretouch* p = new Pretouch;
+    return *p;
+}
+std::thread* g_pt_thread = nullptr;   // never destroyed: a joinable std::thread at exit (ExitProcess runs static destructors) would terminate
+std::atomic<uint64_t> g_pt_bytes{0}, g_pt_ranges{0}, g_pt_dropped{0}, g_pt_ahead{0};
+
+void pretouch_queue(uint64_t addr, uint64_t size) {      // g_heap_mu may be held: takes only pt().mu, never blocks on the worker
+    {
+        std::lock_guard lk(pt().mu);
+        if (pt().q.size() >= 512) {
+            g_pt_dropped.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        pt().q.emplace_back(addr, size);
+    }
+    pt().cv.notify_one();
+}
+
+void pretouch_main() {
+    log_set_thread_name("heap-pretouch");
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    std::vector<uint8_t> buf(256 << 10);
+    uint64_t logged_bytes = 0;
+    for (;;) {
+        std::pair<uint64_t, uint64_t> r;
+        {
+            std::unique_lock lk(pt().mu);
+            if (!pt().cv.wait_for(lk, std::chrono::seconds(30), [] { return pt().stop || !pt().q.empty(); })) {
+                const uint64_t b = g_pt_bytes.load(std::memory_order_relaxed);
+                if (b != logged_bytes) {       // a summary after a quiet spell (a load's burst is over)
+                    logged_bytes = b;
+                    NXLOG_I(kTag, "heap_pretouch: %llu MiB read ahead in %llu granules (%llu committed ahead), %llu dropped (queue full)",
+                            static_cast<unsigned long long>(b >> 20), static_cast<unsigned long long>(g_pt_ranges.load()),
+                            static_cast<unsigned long long>(g_pt_ahead.load()), static_cast<unsigned long long>(g_pt_dropped.load()));
+                }
+                continue;
+            }
+            if (pt().stop) return;
+            r = pt().q.front();
+            pt().q.pop_front();
+        }
+        for (uint64_t a = r.first, end = r.first + r.second; a < end;) {
+            const uint64_t n = std::min<uint64_t>(buf.size(), end - a);
+            SIZE_T got = 0;
+            ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(a), buf.data(), static_cast<SIZE_T>(n), &got);
+            g_pt_bytes.fetch_add(got, std::memory_order_relaxed);
+            if (got < n) break;            // decommitted, protected or unmapped meanwhile: leave the rest to the game
+            a += n;
+        }
+        g_pt_ranges.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void pretouch_start() {
+    g_pretouch = static_cast<int>(std::clamp<int64_t>(config_get_int("memory", "heap_pretouch", 0), 0, 2));
+    if (!g_pretouch || (g_pt_thread && g_pt_thread->joinable())) return;
+    {
+        std::lock_guard lk(pt().mu);
+        pt().stop = false;
+        pt().q.clear();
+    }
+    if (!g_pt_thread) g_pt_thread = new std::thread;
+    *g_pt_thread = std::thread(pretouch_main);
+    NXLOG_I(kTag, "heap_pretouch %d: each lazily committed granule is read ahead on a background thread%s", g_pretouch,
+            g_pretouch >= 2 ? ", and the next granule is committed and read too" : "");
+}
+
+void pretouch_stop() {
+    if (!g_pt_thread || !g_pt_thread->joinable()) return;
+    {
+        std::lock_guard lk(pt().mu);
+        pt().stop = true;
+        pt().q.clear();
+    }
+    pt().cv.notify_all();
+    g_pt_thread->join();
+}
+
 // First touch of a kLazy page from any thread: commit its granule and run the access again. Nothing in this file touches guest memory
 // while holding g_heap_mu, so taking it here cannot deadlock on this thread.
 bool lazy_try(uint64_t a) {
@@ -195,6 +294,23 @@ bool lazy_try(uint64_t a) {
     if (g_heap_cls[p] != kLazy) return false;   // a real fault (or the write tracker's): not ours
     if (!lazy_commit_granules_locked(p, p + 1)) return false;
     g_lazy_faults.fetch_add(1, std::memory_order_relaxed);
+    if (g_pretouch) {
+        const uint64_t g0 = (a - kHeapBase) & ~(kGranule - 1);
+        pretouch_queue(kHeapBase + g0, std::min<uint64_t>(kGranule, g_heap_size - g0));
+        const uint64_t g1 = g0 + kGranule;
+        if (g_pretouch >= 2 && g1 < g_heap_size) {
+            const uint64_t q = g1 / kPage;
+            bool lazy = false;      // only a granule still wholly lazy: one the game set up but has not touched
+            for (uint64_t r = q; r < std::min<uint64_t>(q + kGranule / kPage, g_heap_cls.size()); ++r) {
+                if (g_heap_cls[r] != kLazy) { lazy = false; break; }
+                lazy = true;
+            }
+            if (lazy && lazy_commit_granules_locked(q, q + 1)) {
+                g_pt_ahead.fetch_add(1, std::memory_order_relaxed);
+                pretouch_queue(kHeapBase + g1, std::min<uint64_t>(kGranule, g_heap_size - g1));
+            }
+        }
+    }
     return true;
 }
 // The vectored handler. Until the write tracker installs its own handler (the first pool copy or the texture heap's region; that one
@@ -296,6 +412,7 @@ bool init(const Config& cfg) {
 }
 
 void shutdown() {
+    pretouch_stop();        // before the heap goes away (its reads would only fail, but the thread must not outlive the state)
     std::lock_guard lk(g_state_mu);
     {
         std::lock_guard hl(g_heap_mu);
@@ -610,6 +727,7 @@ bool heap_create(uint64_t reserve_bytes) {
             NXLOG_I(kTag, "heap: pages are committed at their first use ([memory] heap_lazy_commit)");
         }
     }
+    if (g_lazy) pretouch_start();
     g_commit_bits.assign((size / kPage + 63) / 64, 0);
     g_heap_cls.assign(static_cast<size_t>(size / kPage), 0);
     g_committed = 0;
@@ -841,6 +959,8 @@ bool heap_touch(uint64_t addr, uint64_t size) {
 
 GaugeHook gauge_lazy_faults("mem.lazy_faults", [] { return static_cast<int64_t>(g_lazy_faults.load(std::memory_order_relaxed)); });
 GaugeHook gauge_lazy_raced("mem.lazy_raced", [] { return static_cast<int64_t>(g_lazy_raced.load(std::memory_order_relaxed)); });
+GaugeHook gauge_pretouch_mb("mem.pretouch_mb", [] { return static_cast<int64_t>(g_pt_bytes.load(std::memory_order_relaxed) >> 20); });
+GaugeHook gauge_pretouch_ahead("mem.pretouch_ahead", [] { return static_cast<int64_t>(g_pt_ahead.load(std::memory_order_relaxed)); });
 GaugeHook gauge_lazy_mb("mem.lazy_committed_mb", [] { return static_cast<int64_t>(g_lazy_bytes.load(std::memory_order_relaxed) >> 20); });
 
 uint64_t heap_committed() {
