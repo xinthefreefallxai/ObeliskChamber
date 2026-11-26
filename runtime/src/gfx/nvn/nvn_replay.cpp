@@ -934,10 +934,14 @@ void wm_close();      // below: open batched-update barriers ([nvn] batch_ubo_up
 uint64_t qpc_now() {     // ns, steady
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 }
+uint32_t split_min_draws() {
+    static const uint32_t v = static_cast<uint32_t>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "split_min_draws", 16)));   // tests use 0
+    return v;
+}
+bool g_split_keep_ro = false;   // split_in_pass_after_draw ended a read-only-depth pass: depth_ro_for_draw keeps it for the reopen
 void maybe_split() {
     const uint64_t ticks = split_ticks();
-    static const uint32_t min_draws = static_cast<uint32_t>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "split_min_draws", 16)));   // tests use 0
-    if (!ticks || P.open || g_split_draws < min_draws) return;
+    if (!ticks || P.open || g_split_draws < split_min_draws()) return;
     if (g_occ_active >= 0 || g_cw[0].active >= 0 || g_cw[1].active >= 0 || g_xfb_active || g_xfb_began) return;   // queries, stream-out: one buffer
     const uint64_t now = qpc_now();
     if (now - g_split_t0 < ticks) return;
@@ -1112,6 +1116,7 @@ bool ensure_pass(bool depth_ro = false, bool writes = false) {
     gstamp("pass setup");
     vkCmdBeginRendering(F->cb, &ri);
     P.open = true;
+    g_split_keep_ro = false;
     if (pass_labels_on()) {
         static uint64_t frame = ~0ull;
         static uint32_t seq = 0;
@@ -3679,7 +3684,7 @@ void cs_draw_index_range(uint64_t addr, uint64_t size);
 bool depth_ro_for_draw() {
     if (g_want_depth_ro) return true;
     static const bool sticky = nxrt::config_get_bool("nvn", "depth_ro_sticky", !nxrt::gfx::gpu_quirks().intel_compat);   // [gfx] intel_compat: off
-    if (!sticky || !P.open || !P.depth_ro || !targets_match()) return false;
+    if (!sticky || !(P.open || g_split_keep_ro) || !P.depth_ro || !targets_match()) return false;   // a split pass reopens as it was
     const bool writes_depth = S.ds.depth_test && S.ds.depth_write;
     const bool writes_stencil = P.has_stencil && S.ds.stencil_test && (S.stencil_wmask[0] != 0 || S.stencil_wmask[1] != 0);
     return !writes_depth && !writes_stencil;
@@ -4042,10 +4047,20 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
 // down. The reopened pass gets the attachment-to-attachment barrier of any pass reopened on its targets.
 std::atomic<int64_t> g_split_in_pass{0};   // gauge nvn.split_in_pass (render thread writes)
 void split_in_pass_after_draw() {
-    static const uint32_t n = static_cast<uint32_t>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "split_in_pass_draws", 0)));
+    // at least split_min_draws, or maybe_split would refuse every time after the pass was ended for it
+    static const uint32_t n = [] {
+        const int64_t v = nxrt::config_get_int("nvn", "split_in_pass_draws", 0);
+        return v > 0 ? std::max(static_cast<uint32_t>(v), split_min_draws()) : 0u;
+    }();
     if (!n || !P.open || g_split_draws < n || !split_ticks() || g_trace) return;
     if (g_occ_active >= 0 || g_cw[0].active >= 0 || g_cw[1].active >= 0 || g_xfb_active || g_xfb_began) return;   // as maybe_split
     if (qpc_now() - g_split_t0 < split_ticks()) return;
+    if (!split_possible(*F)) {      // batched submits, a pool copy: known before the pass is ended for nothing
+        g_split_t0 = qpc_now();
+        g_split_draws = 0;
+        return;
+    }
+    g_split_keep_ro = P.depth_ro;
     end_pass(true);
     const uint64_t before = split_count();
     maybe_split();

@@ -481,10 +481,14 @@ std::atomic<uint64_t> g_splits{0};
 
 }  // namespace
 
-bool split_submission(Frame& f) {
+bool split_possible(const Frame& f) {
     if (!g || !f.split_ok || !f.slot || g->frame_batch || g->batch_max > 1 || pool_copy_pending() || !on_render_thread()) return false;
+    return f.cb == static_cast<const Slot*>(f.slot)->cb;
+}
+
+bool split_submission(Frame& f) {
+    if (!split_possible(f)) return false;
     Slot& s = *static_cast<Slot*>(f.slot);
-    if (f.cb != s.cb) return false;
     VkCommandBuffer next = VK_NULL_HANDLE;     // the buffer for the rest first: without one nothing is split
     if (!s.split_free.empty()) {
         next = s.split_free.back();

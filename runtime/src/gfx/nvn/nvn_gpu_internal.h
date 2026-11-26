@@ -105,6 +105,8 @@ struct Frame {
 // the caller must treat all command buffer state (bound pipeline, sets, vertex buffers, dynamic state) as lost. Outside a render pass only.
 // False (nothing done) when the submission cannot be split (batched submits, a pending pool copy, a frame that is not a slot's).
 bool split_submission(Frame& f);
+// The cheap checks of split_submission, without doing anything: a caller that must end a render pass first asks this before.
+bool split_possible(const Frame& f);
 uint64_t split_count();   // command buffers handed over early so far
 
 // Destruction: fn runs once every submission made so far (and the one being recorded) has completed.
