@@ -4035,6 +4035,28 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
 }
 
 
+// [nvn] split_in_pass_draws = N (default 0 = off; BN3 after BananaNative): with split_submit_ms, a split can also come inside a long render
+// pass. Once the split time has passed and N draws were recorded since the last split, the pass is ended, the commands so far go to the
+// GPU, and the next draw opens the pass again on the same targets (LOAD: an attachment is CLEARed only while its layout is undefined).
+// Fortune's Weave's main pass has ~650 draws, so without this a weak CPU's recording of it leaves the GPU idle, and an idle GPU clocks
+// down. The reopened pass gets the attachment-to-attachment barrier of any pass reopened on its targets.
+std::atomic<int64_t> g_split_in_pass{0};   // gauge nvn.split_in_pass (render thread writes)
+void split_in_pass_after_draw() {
+    static const uint32_t n = static_cast<uint32_t>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "split_in_pass_draws", 0)));
+    if (!n || !P.open || g_split_draws < n || !split_ticks() || g_trace) return;
+    if (g_occ_active >= 0 || g_cw[0].active >= 0 || g_cw[1].active >= 0 || g_xfb_active || g_xfb_began) return;   // as maybe_split
+    if (qpc_now() - g_split_t0 < split_ticks()) return;
+    end_pass(true);
+    const uint64_t before = split_count();
+    maybe_split();
+    if (split_count() != before) {
+        g_split_in_pass.fetch_add(1, std::memory_order_relaxed);
+    } else {    // not split after all (batched submits, a pool copy, too few draws for split_min_draws): wait a whole period again
+        g_split_t0 = qpc_now();
+        g_split_draws = 0;
+    }
+}
+
 // [nvn] trace_snap = "253,300": after those draws of the traced frame the pass is closed and the colour targets and the depth target are
 // copied (png after the frame: snap_d<draw>_t<id>_<format>.png).
 void trace_snap_after_draw() {
@@ -4277,6 +4299,7 @@ void do_draw_arrays(const P_DrawArrays& p) {
     g_pass_draws++;
     g_pass_verts += static_cast<uint64_t>(p.count) * std::max<uint32_t>(1, p.instance_count);
     trace_snap_after_draw();
+    split_in_pass_after_draw();
 }
 
 void do_draw_elements(const P_DrawElements& p) {
@@ -4372,6 +4395,7 @@ void do_draw_elements(const P_DrawElements& p) {
     g_pass_draws++;
     g_pass_verts += static_cast<uint64_t>(p.count) * std::max<uint32_t>(1, p.instance_count);
     trace_snap_after_draw();
+    split_in_pass_after_draw();
 }
 
 // The bytes at a GPU address as the CPU sees them, when they are current: inside a pool, and not a range a submission that has not completed
@@ -4452,6 +4476,7 @@ void draw_indirect_cpu(const P_DrawIndirect& p, PrimConversion conv, uint32_t is
         counters().draws_skipped.fetch_add(1);
     }
     trace_snap_after_draw();
+    split_in_pass_after_draw();
 }
 
 void do_draw_indirect(const P_DrawIndirect& p) {
@@ -4493,6 +4518,7 @@ void do_draw_indirect(const P_DrawIndirect& p) {
     counters().draws.fetch_add(1, std::memory_order_relaxed);
     g_pass_draws++;
     trace_snap_after_draw();
+    split_in_pass_after_draw();
 }
 
 // DrawTransformFeedback(mode, control): draws what the feedback section begun with this control buffer wrote, as many vertices as it wrote
@@ -4525,6 +4551,7 @@ void do_draw_xfb(const P_DrawXfb& p) {
     counters().draws.fetch_add(1, std::memory_order_relaxed);
     g_pass_draws++;
     trace_snap_after_draw();
+    split_in_pass_after_draw();
 }
 
 std::string g_cs_missing;   // trace: the untranslated block(s) of the bound compute program ("cs -" dispatches)
@@ -6771,8 +6798,12 @@ namespace {
 struct ReplayGauges {
     ReplayGauges() {
         nxrt::gauge_register("nvn.replay.fb_clones", [] { return g_fb_clone_n.load(std::memory_order_relaxed); });
+        nxrt::gauge_register("nvn.split_in_pass", [] { return g_split_in_pass.load(std::memory_order_relaxed); });
     }
-    ~ReplayGauges() { nxrt::gauge_unregister("nvn.replay.fb_clones"); }
+    ~ReplayGauges() {
+        nxrt::gauge_unregister("nvn.replay.fb_clones");
+        nxrt::gauge_unregister("nvn.split_in_pass");
+    }
 };
 ReplayGauges g_replay_gauges;
 }  // namespace
