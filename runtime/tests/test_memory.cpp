@@ -309,6 +309,40 @@ NXTEST(heap_lazy_commit_threads_racing_for_a_granule) {
     _putenv_s("NXRT_MEMORY_HEAP_LAZY_COMMIT", "0");
 }
 
+// [memory] heap_pretouch = 2: a first touch commits its granule and, when the system has room, the next one if that is still wholly lazy
+// (both are read on the worker); a granule with a page given back is not committed ahead; the heap can be shut down and created again
+// with the worker running.
+NXTEST(heap_pretouch_commits_ahead_and_restarts) {
+    mem::shutdown();
+    _putenv_s("NXRT_MEMORY_HEAP_LAZY_COMMIT", "1");
+    _putenv_s("NXRT_MEMORY_HEAP_PRETOUCH", "2");
+    constexpr uint64_t kGran = 2ull << 20;
+    for (int round = 0; round < 2; ++round) {
+        CHECK(mem::init());
+        CHECK(mem::heap_create(kHeapSmall));
+        CHECK(mem::heap_commit(0, 8 * kGran));
+        if (mem::heap_committed() != 0) {   // Wine: lazy commit stays off
+            nxtest::skip("heap_lazy_commit is off on this host");
+            break;
+        }
+        MEMORYSTATUSEX ms{};
+        ms.dwLength = sizeof ms;
+        const bool room = GlobalMemoryStatusEx(&ms) && ms.ullAvailPageFile >= (4ull << 30);
+        CHECK(mem::heap_decommit(kGran + 5 * kPg, kPg));             // a page of the next granule that can't be read later
+        CHECK(touch(mem::kHeapBase + 3 * kPg, true));                // first use: this granule (and the next, with room)
+        CHECK_EQ(mem::heap_committed(), kGran);                      // the next granule is no longer wholly lazy: not ahead
+        CHECK(touch(mem::kHeapBase + 2 * kGran, true));              // granule 2, and granule 3 ahead
+        CHECK_EQ(mem::heap_committed(), room ? 3 * kGran : 2 * kGran);
+        word_at(mem::kHeapBase + 3 * kGran + kPg)[0] = 0xCAFE0005u;  // a page committed ahead takes writes
+        CHECK_EQ(word_at(mem::kHeapBase + 3 * kGran + kPg)[0], 0xCAFE0005u);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));  // let the worker read some of it
+        mem::shutdown();                                             // stops the worker first
+    }
+    mem::shutdown();
+    _putenv_s("NXRT_MEMORY_HEAP_PRETOUCH", "0");
+    _putenv_s("NXRT_MEMORY_HEAP_LAZY_COMMIT", "0");
+}
+
 NXTEST(alias_commit_through_alias_view_is_seen_by_primary) {
     mem::shutdown();
     CHECK(mem::init());

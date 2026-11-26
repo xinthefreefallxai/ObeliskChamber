@@ -184,8 +184,9 @@ bool lazy_commit_granules_locked(uint64_t p0, uint64_t p1) {
 // load's faults land in the heap: zstd output, memset, memcpy). A background thread reads every page of the granule right after the
 // commit, so Windows makes those pages while the game is still on the first ones. 2 also commits the next granule (if still lazy) and
 // reads it, so the game's first touch there takes neither the commit nor the faults. ReadProcessMemory does the reads: a page the
-// game decommits or a heap that goes away meanwhile makes it fail, not fault. Reading a page adds it to RAM; at most the granule
-// rounding (2 MiB) per granule the game touched, plus one granule ahead with 2.
+// game decommits or a heap that goes away meanwhile makes it fail, not fault. Reading a page adds it to RAM: the rest of each granule the
+// game touched, and with 2 up to one more granule per lazy fault (so up to about twice the touched granules), and only while the system
+// has 4 GB of commit free. Pages committed ahead stay committed after heap_decommit (it makes committed section pages NOACCESS).
 int g_pretouch = 0;
 constexpr uint64_t kGranule = 2ull << 20;
 // Never destroyed, like the thread: the worker can still wait on them while ExitProcess runs static destructors.
@@ -200,7 +201,7 @@ Pretouch& pt() {
     return *p;
 }
 std::thread* g_pt_thread = nullptr;   // never destroyed: a joinable std::thread at exit (ExitProcess runs static destructors) would terminate
-std::atomic<uint64_t> g_pt_bytes{0}, g_pt_ranges{0}, g_pt_dropped{0}, g_pt_ahead{0};
+std::atomic<uint64_t> g_pt_bytes{0}, g_pt_ranges{0}, g_pt_dropped{0}, g_pt_ahead{0}, g_pt_no_room{0};
 
 void pretouch_queue(uint64_t addr, uint64_t size) {      // g_heap_mu may be held: takes only pt().mu, never blocks on the worker
     {
@@ -224,12 +225,15 @@ void pretouch_main() {
         {
             std::unique_lock lk(pt().mu);
             if (!pt().cv.wait_for(lk, std::chrono::seconds(30), [] { return pt().stop || !pt().q.empty(); })) {
+                lk.unlock();                   // the log's file I/O must not hold up a game thread's lazy fault (it queues under pt().mu)
                 const uint64_t b = g_pt_bytes.load(std::memory_order_relaxed);
                 if (b != logged_bytes) {       // a summary after a quiet spell (a load's burst is over)
                     logged_bytes = b;
-                    NXLOG_I(kTag, "heap_pretouch: %llu MiB read ahead in %llu granules (%llu committed ahead), %llu dropped (queue full)",
+                    NXLOG_I(kTag, "heap_pretouch: %llu MiB read (pages the game had made already included) in %llu granules, %llu "
+                                  "committed ahead (%llu not: under 4 GB of free commit), %llu dropped (queue full)",
                             static_cast<unsigned long long>(b >> 20), static_cast<unsigned long long>(g_pt_ranges.load()),
-                            static_cast<unsigned long long>(g_pt_ahead.load()), static_cast<unsigned long long>(g_pt_dropped.load()));
+                            static_cast<unsigned long long>(g_pt_ahead.load()), static_cast<unsigned long long>(g_pt_no_room.load()),
+                            static_cast<unsigned long long>(g_pt_dropped.load()));
                 }
                 continue;
             }
@@ -242,8 +246,9 @@ void pretouch_main() {
             SIZE_T got = 0;
             ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(a), buf.data(), static_cast<SIZE_T>(n), &got);
             g_pt_bytes.fetch_add(got, std::memory_order_relaxed);
-            if (got < n) break;            // decommitted, protected or unmapped meanwhile: leave the rest to the game
-            a += n;
+            // A short read stops at a page that can't be read (decommitted, NOACCESS from the write tracker, never set up, or the heap
+            // gone): step over that page and go on with the rest of the range.
+            a += got < n ? (static_cast<uint64_t>(got) & ~(kPage - 1)) + kPage : n;
         }
         g_pt_ranges.fetch_add(1, std::memory_order_relaxed);
     }
@@ -304,6 +309,14 @@ bool lazy_try(uint64_t a) {
             for (uint64_t r = q; r < std::min<uint64_t>(q + kGranule / kPage, g_heap_cls.size()); ++r) {
                 if (g_heap_cls[r] != kLazy) { lazy = false; break; }
                 lazy = true;
+            }
+            // Only with room to spare in the system's commit: a granule committed ahead must not take the charge the game's next real
+            // first touch needs (on an 8 GB PC near its limit that touch would fail and reach the crash handler).
+            MEMORYSTATUSEX ms{};
+            ms.dwLength = sizeof ms;
+            if (lazy && (!GlobalMemoryStatusEx(&ms) || ms.ullAvailPageFile < (4ull << 30))) {
+                lazy = false;
+                g_pt_no_room.fetch_add(1, std::memory_order_relaxed);
             }
             if (lazy && lazy_commit_granules_locked(q, q + 1)) {
                 g_pt_ahead.fetch_add(1, std::memory_order_relaxed);
