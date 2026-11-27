@@ -938,13 +938,30 @@ uint32_t split_min_draws() {
     static const uint32_t v = static_cast<uint32_t>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "split_min_draws", 16)));   // tests use 0
     return v;
 }
+// [nvn] split_every_draws = N (default 0 = off; after shadPS4, which submits every few draws): the commands so far go to the GPU after
+// every N draws, at a pass boundary or inside a pass (as split_in_pass_draws), whatever split_submit_ms says. A count instead of a time:
+// the GPU gets work at a steady rate however fast the render thread records. Read once.
+uint32_t split_every_draws() {
+    static const uint32_t v = [] {
+        const int64_t n = std::max<int64_t>(0, nxrt::config_get_int("nvn", "split_every_draws", 0));
+        if (n > 0) NXLOG_I(kTag, "split_every_draws %lld: submissions go to the GPU every %lld draws", static_cast<long long>(n), static_cast<long long>(n));
+        return static_cast<uint32_t>(std::min<int64_t>(n, 1 << 20));
+    }();
+    return v;
+}
+// A split is due: split_every_draws draws, or split_submit_ms of recording (with split_min_draws draws) since the last one.
+bool split_due(uint64_t now) {
+    const uint32_t every = split_every_draws();
+    if (every && g_split_draws >= every) return true;
+    const uint64_t ticks = split_ticks();
+    return ticks && g_split_draws >= split_min_draws() && now - g_split_t0 >= ticks;
+}
 bool g_split_keep_ro = false;   // split_in_pass_after_draw ended a read-only-depth pass: depth_ro_for_draw keeps it for the reopen
 void maybe_split() {
-    const uint64_t ticks = split_ticks();
-    if (!ticks || P.open || g_split_draws < split_min_draws()) return;
+    if (P.open || (!split_ticks() && !split_every_draws())) return;
     if (g_occ_active >= 0 || g_cw[0].active >= 0 || g_cw[1].active >= 0 || g_xfb_active || g_xfb_began) return;   // queries, stream-out: one buffer
     const uint64_t now = qpc_now();
-    if (now - g_split_t0 < ticks) return;
+    if (!split_due(now)) return;
     const int labels = g_dbg_depth;
     for (int i = 0; i < labels; ++i) vkCmdEndDebugUtilsLabelEXT(F->cb);     // labels cannot outlive their command buffer (later pops close nothing)
     if (labels) g_dbg_depth = 0;
@@ -4052,9 +4069,12 @@ void split_in_pass_after_draw() {
         const int64_t v = nxrt::config_get_int("nvn", "split_in_pass_draws", 0);
         return v > 0 ? std::max(static_cast<uint32_t>(v), split_min_draws()) : 0u;
     }();
-    if (!n || !P.open || g_split_draws < n || !split_ticks() || g_trace) return;
+    if (!P.open || g_trace) return;
+    const uint32_t every = split_every_draws();
+    const bool due_every = every && g_split_draws >= every;
+    if (!due_every && (!n || g_split_draws < n || !split_ticks())) return;
     if (g_occ_active >= 0 || g_cw[0].active >= 0 || g_cw[1].active >= 0 || g_xfb_active || g_xfb_began) return;   // as maybe_split
-    if (qpc_now() - g_split_t0 < split_ticks()) return;
+    if (!due_every && qpc_now() - g_split_t0 < split_ticks()) return;
     if (!split_possible(*F)) {      // batched submits, a pool copy: known before the pass is ended for nothing
         g_split_t0 = qpc_now();
         g_split_draws = 0;
