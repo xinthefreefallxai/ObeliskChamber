@@ -8,4 +8,6 @@ namespace nxrt::gfx {
 // with the unifiedImageLayouts feature.
 void unified_layouts_install();
 bool unified_layouts_on();
+// What keeps it off although asked for: FSR 3 frame generation or XeSS chosen (they record with layouts of their own). Null: nothing.
+const char* unified_layouts_blocked();
 }  // namespace nxrt::gfx

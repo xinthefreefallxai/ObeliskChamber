@@ -8,13 +8,17 @@
 // stay) with GENERAL on both sides, and descriptors, attachments, copies, blits, clears and resolves name GENERAL. UNDEFINED,
 // PREINITIALIZED and the present layouts are left as they are.
 //
-// Not covered: third-party SDKs that record with their own function table (DLSS through Streamline, FSR, XeSS) are told the layouts the
-// runtime tracks, which then differ from GENERAL. Use the built-in upscaler with it.
+// Not covered: SDKs that record with their own function table and are told the layouts the runtime tracks: FSR 3 frame generation (the
+// backbuffer it reads in SHADER_READ_ONLY) and XeSS (its inputs). With either chosen the switch does nothing (unified_layouts_blocked).
+// DLSS is consistent: its Streamline resource tags already say GENERAL.
 #include "vk_unified.h"
 
 #include <atomic>
+#include <cctype>
+#include <string>
 #include <vector>
 
+#include "nxrt/config.h"
 #include "nxrt/log.h"
 
 namespace nxrt::gfx {
@@ -60,7 +64,6 @@ bool image_descriptor(VkDescriptorType t) {
 struct Scratch {
     std::vector<VkImageMemoryBarrier> ib;
     std::vector<VkImageMemoryBarrier2> ib2;
-    std::vector<VkDependencyInfo> dep;
     std::vector<VkRenderingAttachmentInfo> att;
     std::vector<VkWriteDescriptorSet> writes;
     std::vector<VkDescriptorImageInfo> images;
@@ -216,5 +219,18 @@ void unified_layouts_install() {   // after every volkLoadDevice (a wrapper alre
 }
 
 bool unified_layouts_on() { return g_on.load(std::memory_order_relaxed); }
+
+const char* unified_layouts_blocked() {
+    auto low = [](std::string s) {
+        for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+    const std::string fg = low(config_get_str("dlss", "frame_gen", "0"));
+    if (fg == "3" || fg == "fsr3" || fg == "fsr") return "FSR 3 frame generation ([dlss] frame_gen)";
+    const std::string up = low(config_get_str("dlss", "upscaler", "taau"));
+    if (up == "xess" || up == "auto") return "XeSS ([dlss] upscaler = xess or auto)";
+    if (low(config_get_str("upscale", "mode", "")) == "xess") return "XeSS ([upscale] mode)";
+    return nullptr;
+}
 
 }  // namespace nxrt::gfx
