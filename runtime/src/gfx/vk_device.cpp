@@ -33,6 +33,7 @@
 #include "nxrt/memory.h"
 #include "vk_gauges.h"
 #include "vk_layer_filter.h"
+#include "vk_unified.h"
 #include "video_alloc_stats.h"
 #include "extras/framegen.h"
 #include "extras/framegen_ffx.h"
@@ -808,7 +809,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     VkPhysicalDevicePageableDeviceLocalMemoryFeaturesEXT apage = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PAGEABLE_DEVICE_LOCAL_MEMORY_FEATURES_EXT};
     VkPhysicalDeviceShaderAtomicFloatFeaturesEXT aaf = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
     VkPhysicalDeviceFaultFeaturesEXT afault = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
-    // One general image layout for every use (VK_KHR_unified_image_layouts, 2025): logged for now, so test logs say which drivers offer it.
+    // One general image layout for every use (VK_KHR_unified_image_layouts, 2025): logged, so test logs say which drivers offer it.
     NXLOG_I(kTag, "VK_KHR_unified_image_layouts: %s", has_dext("VK_KHR_unified_image_layouts") ? "offered" : "not offered");
     std::vector<const char*> dev_exts;
     void* chain = nullptr;
@@ -822,6 +823,9 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
         return true;
     };
     const bool x_fsi = add_ext(VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME, &afsi);
+    // [gfx] unified_layouts (default false; vk_unified.cpp): with the feature, every image is used in the general layout
+    VkPhysicalDeviceUnifiedImageLayoutsFeaturesKHR aul = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR};
+    const bool x_ul = config_get_bool("gfx", "unified_layouts", false) && add_ext(VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME, &aul);
     const bool x_af = add_ext(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME, &aaf);   // native float adds to buffers (spirv_native_float_add)
     // after a device loss, what the driver knows about the fault (faulting address, the vendor's fault code) for the report (#121).
     // [gfx] device_fault = false: not enabled.
@@ -1065,6 +1069,8 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
         vkGetDeviceProcAddr = sl_gdpa;
     }
     volkLoadDevice(device_);
+    if (x_ul && aul.unifiedImageLayouts) gfx::unified_layouts_install();
+    else if (config_get_bool("gfx", "unified_layouts", false)) NXLOG_W(kTag, "[gfx] unified_layouts: the driver does not offer VK_KHR_unified_image_layouts: layouts as before");
     driver_allocate_memory = vkAllocateMemory;
     driver_free_memory = vkFreeMemory;
     vkAllocateMemory = counted_allocate_memory;
