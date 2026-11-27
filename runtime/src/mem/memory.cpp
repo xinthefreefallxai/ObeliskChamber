@@ -92,12 +92,12 @@ std::vector<uint8_t> g_heap_cls;
 constexpr uint8_t kLazy = 4;
 bool g_lazy = false;                      // set by heap_create
 std::atomic<uint64_t> g_lazy_faults{0}, g_lazy_bytes{0};
-std::atomic<uint64_t> g_lazy_raced{0};
+std::atomic<uint64_t> g_lazy_raced{0};   // lazy faults whose page another thread committed first (retried)
 std::atomic<uint64_t> g_zero_skipped{0}, g_zero_calls{0};   // [memory] zero_skip: bytes left alone, calls that left some
 // For the hitch line and the load breakdown: what the first touches committed, and what zero_skip spared.
 const bool g_lazy_hitch = (nxrt::hitch_add_counter("lazy_commit_mb", []() -> uint64_t { return g_lazy_bytes.load(std::memory_order_relaxed) >> 20; }),
                            nxrt::hitch_add_counter("zero_skip_mb", []() -> uint64_t { return g_zero_skipped.load(std::memory_order_relaxed) >> 20; }),
-                           true);   // lazy faults whose page another thread committed first (retried)
+                           true);
 std::atomic<uint64_t> g_heap_epoch{0};    // bumped by every change of the table, inside the change's OsWriteScope
 struct Alias {
     uint64_t size;
