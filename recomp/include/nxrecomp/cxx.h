@@ -121,6 +121,8 @@ raw:
 extern "C" void nx_hle_zstd_multiframe(Ctx *NX_NOESC c, void (*orig)(Ctx *));
 extern "C" void nx_hle_cull_view_box(Ctx *NX_NOESC c, void (*orig)(Ctx *));          // FEFW_HLE_CULL: 0 lifted, 1 native, 2 both compared
 extern "C" void nx_hle_cull_cylinder_box(Ctx *NX_NOESC c, void (*orig)(Ctx *));
+// In the runtime (nxrt::mem::heap_zero_fill, [memory] zero_skip): a memset with 0 of `n` bytes at `dst`.
+extern "C" void nx_hle_memzero(uint64_t dst, uint64_t n);
 
 namespace nx {
 
@@ -692,7 +694,14 @@ NX_INLINE V128 v_dd(uint64_t lo, uint64_t hi) { V128 v; v.d[0] = lo; v.d[1] = hi
 // register, 0 when equal; strlen: the length). Registers the guest routine clobbers (x1..x18, v0..v7, NZCV) are left as they
 // are: no caller reads them after the call (AAPCS64). The guest memcpy (__memcpy_aarch64) is overlap-safe like memmove.
 NX_INLINE void hle_memmove(Ctx *c) { std::memmove(reinterpret_cast<void *>(c->x[0]), reinterpret_cast<const void *>(c->x[1]), c->x[2]); }
-NX_INLINE void hle_memset(Ctx *c) { std::memset(reinterpret_cast<void *>(c->x[0]), static_cast<int>(static_cast<uint8_t>(c->x[1])), c->x[2]); }
+NX_INLINE void hle_memset(Ctx *c) {
+    const uint8_t v = static_cast<uint8_t>(c->x[1]);
+    if (v == 0 && c->x[2] >= (64u << 10)) {   // large zero fills: the runtime may leave heap pages never used alone ([memory] zero_skip)
+        nx_hle_memzero(c->x[0], c->x[2]);
+        return;
+    }
+    std::memset(reinterpret_cast<void *>(c->x[0]), static_cast<int>(v), c->x[2]);
+}
 NX_INLINE void hle_strlen(Ctx *c) { c->x[0] = std::strlen(reinterpret_cast<const char *>(c->x[0])); }
 NX_INLINE uint32_t hle_bytediff(uint64_t x, uint64_t y) {   // first differing byte (lowest address = lowest byte) of two unequal words
     const unsigned s = static_cast<unsigned>(__builtin_ctzll(x ^ y)) & ~7u;

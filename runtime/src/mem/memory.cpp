@@ -16,6 +16,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cstring>
 #include <cctype>
 #include <atomic>
 #include <functional>
@@ -91,7 +92,12 @@ std::vector<uint8_t> g_heap_cls;
 constexpr uint8_t kLazy = 4;
 bool g_lazy = false;                      // set by heap_create
 std::atomic<uint64_t> g_lazy_faults{0}, g_lazy_bytes{0};
-std::atomic<uint64_t> g_lazy_raced{0};   // lazy faults whose page another thread committed first (retried)
+std::atomic<uint64_t> g_lazy_raced{0};
+std::atomic<uint64_t> g_zero_skipped{0}, g_zero_calls{0};   // [memory] zero_skip: bytes left alone, calls that left some
+// For the hitch line and the load breakdown: what the first touches committed, and what zero_skip spared.
+const bool g_lazy_hitch = (nxrt::hitch_add_counter("lazy_commit_mb", []() -> uint64_t { return g_lazy_bytes.load(std::memory_order_relaxed) >> 20; }),
+                           nxrt::hitch_add_counter("zero_skip_mb", []() -> uint64_t { return g_zero_skipped.load(std::memory_order_relaxed) >> 20; }),
+                           true);   // lazy faults whose page another thread committed first (retried)
 std::atomic<uint64_t> g_heap_epoch{0};    // bumped by every change of the table, inside the change's OsWriteScope
 struct Alias {
     uint64_t size;
@@ -1054,4 +1060,64 @@ VmInfo vm_query(uint64_t addr) {
     return VmInfo{0, gap_end, kMemFree, 0};
 }
 
+void heap_zero_fill(uint64_t addr, uint64_t size) {
+    static const bool on = [] {
+        const bool v = config_get_bool("memory", "zero_skip", false);
+        if (v) NXLOG_I(kTag, "[memory] zero_skip: the game's large zero fills leave heap pages that were never used alone");
+        return v;
+    }();
+    const uint64_t end = addr + size;
+    if (!on || !g_lazy || size < kPage || end < addr || addr < kHeapBase || end > kHeapBase + kHeapMax) {
+        std::memset(reinterpret_cast<void*>(addr), 0, size);
+        return;
+    }
+    const uint64_t pa = align_up(addr, kPage), pe = end & ~(kPage - 1);   // the whole pages of the range
+    if (pa >= pe) {
+        std::memset(reinterpret_cast<void*>(addr), 0, size);
+        return;
+    }
+    std::memset(reinterpret_cast<void*>(addr), 0, pa - addr);
+    uint64_t skipped = 0;
+    constexpr uint64_t kWindow = 512;   // pages looked at under the lock at a time (2 MiB): the lazy-commit faults of other threads wait no longer
+    for (uint64_t w = pa; w < pe;) {
+        const uint64_t we = std::min(pe, w + kWindow * kPage);
+        struct Run { uint64_t s, e; };
+        Run runs[kWindow / 2 + 1];      // a run is written pages followed by a lazy page, or the window's end: at most half the pages plus one
+        int nr = 0;
+        bool whole = false;             // the window is not (all) in the heap: written as it is, faulting as before
+        {
+            std::lock_guard lk(g_heap_mu);
+            if (!g_heap_size || we > kHeapBase + g_heap_size || g_heap_cls.size() < (we - kHeapBase) / kPage) {
+                whole = true;
+            } else {
+                uint64_t rs = 0;
+                bool in_run = false;
+                for (uint64_t p = w; p < we; p += kPage) {
+                    if (g_heap_cls[(p - kHeapBase) / kPage] == kLazy) {   // never committed: reads as zero once its first touch commits it
+                        if (in_run) runs[nr++] = {rs, p};
+                        in_run = false;
+                        skipped += kPage;
+                    } else if (!in_run) {
+                        rs = p;
+                        in_run = true;
+                    }
+                }
+                if (in_run) runs[nr++] = {rs, we};
+            }
+        }
+        // written outside the lock: a write that faults (a page made inaccessible) goes to the handlers as the plain memset did
+        if (whole) std::memset(reinterpret_cast<void*>(w), 0, we - w);
+        for (int i = 0; i < nr; ++i) std::memset(reinterpret_cast<void*>(runs[i].s), 0, runs[i].e - runs[i].s);
+        w = we;
+    }
+    std::memset(reinterpret_cast<void*>(pe), 0, end - pe);
+    if (skipped) {
+        g_zero_skipped.fetch_add(skipped, std::memory_order_relaxed);
+        g_zero_calls.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
 }  // namespace nxrt::mem
+
+// recomp cxx.h hle_memset: the guest's memset with 0 over 64 KiB or more
+extern "C" void nx_hle_memzero(uint64_t dst, uint64_t n) { nxrt::mem::heap_zero_fill(dst, n); }

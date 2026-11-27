@@ -76,7 +76,11 @@ uint64_t heap_committed();
 bool heap_touch(uint64_t addr, uint64_t size);
 // The write tracker's fault handler asks this first: true when addr was a heap page waiting for its first use, now committed (the access
 // can run again). Its own handler is registered later and runs first, and its slow path would walk the heap view for every first touch.
-bool heap_lazy_fault(uint64_t addr);                      // bytes committed through heap_commit minus heap_decommit
+bool heap_lazy_fault(uint64_t addr);
+// The guest's memset with 0 over [addr, +size) (nx_hle_memzero, recomp cxx.h hle_memset for 64 KiB or more). [memory] zero_skip (default
+// false): heap pages still waiting for their first use (heap_lazy_commit) are left alone, because the first touch commits a page that
+// reads as zero; every other byte is written. Without the switch, a plain memset.
+void heap_zero_fill(uint64_t addr, uint64_t size);                      // bytes committed through heap_commit minus heap_decommit
 
 // Memory limits scaled to the PC ([memory] scale_limits = auto: on with 20 GiB of RAM or less or a card of 8.5 GiB or less): the physical
 // RAM the limits are sized for ([memory] test_ram_gb pretends a smaller PC, for tests), the graphics card's largest device-local heap (noted
