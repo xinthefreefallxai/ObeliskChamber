@@ -174,6 +174,7 @@ void guard_loop(Settings s) {
     const double limit_gb = static_cast<double>(s.limit) / kBytesPerGb;
     auto next_log = Clock::now() + std::chrono::seconds(30);
     bool warned = false;
+    log_system_memory();        // what the PC had before the game took its memory: a run can end before the first 30 s line (fefw-recomp #219)
     std::unique_lock<std::mutex> lk(g_mu);
     for (;;) {
         // Returns true as soon as g_stop is set (memguard_stop notifies), so stop is prompt.

@@ -8,6 +8,7 @@
 #include "nxrt/memory.h"
 
 #include "nxrt/config.h"
+#include "nxrt/diag.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
 #include "nxrt/write_watch.h"
@@ -147,6 +148,24 @@ bool bit_test(uint64_t page) { return (g_commit_bits[page / 64] >> (page % 64)) 
 void bit_set(uint64_t page) { g_commit_bits[page / 64] |= uint64_t{1} << (page % 64); }
 void bit_clear(uint64_t page) { g_commit_bits[page / 64] &= ~(uint64_t{1} << (page % 64)); }
 
+// Out of memory (after fefw-recomp #219): when Windows cannot commit the game's heap, the game answers with nn::os OutOfMemory and svcBreak,
+// or the access that needed the page faults, and neither says why. The crash report then starts with this cause. g_heap_mu held for both.
+constexpr const char* kOutOfMemoryHint =
+    "Windows ran out of memory for the game (it could not commit the game's heap). Close other programs and try again; keep the page file "
+    "on (system managed).";
+bool g_oom_hinted = false;          // the hint is ours to clear
+bool out_of_commit(DWORD e) { return e == ERROR_COMMITMENT_LIMIT || e == ERROR_NOT_ENOUGH_MEMORY || e == ERROR_COMMITMENT_MINIMUM; }
+void oom_failed_locked(DWORD e) {
+    if (!out_of_commit(e)) return;
+    crash_set_memory_hint(kOutOfMemoryHint);
+    g_oom_hinted = true;
+}
+void oom_ok_locked() {               // a later commit worked: whatever ends the run now has another cause
+    if (!g_oom_hinted) return;
+    crash_set_memory_hint("");
+    g_oom_hinted = false;
+}
+
 // Commits the kLazy pages in [p0, p1) (page numbers of the section; g_heap_mu held). False if one could not be committed.
 bool lazy_commit_locked(uint64_t p0, uint64_t p1) {
     if (!g_lazy) return true;
@@ -156,10 +175,13 @@ bool lazy_commit_locked(uint64_t p0, uint64_t p1) {
         uint64_t q = p;
         while (q < p1 && g_heap_cls[q] == kLazy) ++q;
         if (!VirtualAlloc(reinterpret_cast<void*>(kHeapBase + p * kPage), static_cast<SIZE_T>((q - p) * kPage), MEM_COMMIT, PAGE_READWRITE)) {
+            const DWORD e = GetLastError();
             NXLOG_E(kTag, "lazy commit [%llx, +%llx): VirtualAlloc failed, error %lu", static_cast<unsigned long long>(p * kPage),
-                    static_cast<unsigned long long>((q - p) * kPage), static_cast<unsigned long>(GetLastError()));
+                    static_cast<unsigned long long>((q - p) * kPage), static_cast<unsigned long>(e));
+            oom_failed_locked(e);
             return false;
         }
+        oom_ok_locked();
         for (uint64_t r = p; r < q; ++r) {
             g_heap_cls[r] = 3;            // the same answer as kLazy: no epoch change
             if (!bit_test(r)) { bit_set(r); g_committed += kPage; }
@@ -696,8 +718,10 @@ bool heap_commit(uint64_t offset, uint64_t size) {
         NXLOG_E(kTag, "heap_commit [%llx, +%llx): VirtualAlloc failed, error %lu",
                 static_cast<unsigned long long>(start), static_cast<unsigned long long>(end - start),
                 static_cast<unsigned long>(e));
+        oom_failed_locked(e);
         return false;
     }
+    oom_ok_locked();
     for (uint64_t p = start / kPage; p < end / kPage; p++) {
         if (!bit_test(p)) {
             bit_set(p);

@@ -58,6 +58,10 @@ if(EXISTS "${NXRT_RECOMP_INCLUDE}")
     target_include_directories(nxrt PUBLIC "${NXRT_RECOMP_INCLUDE}")
 endif()
 target_link_libraries(nxrt PUBLIC psapi)
+# Media Foundation (src/media/movie_mf.cpp) is loaded only when a movie asks for it: Windows N editions ship without it, and a load-time
+# import kept the game from starting there at all (0xC0000135). After fefw-recomp #221.
+target_link_libraries(nxrt PUBLIC delayimp)
+target_link_options(nxrt PUBLIC /DELAYLOAD:mfplat.dll /DELAYLOAD:mfreadwrite.dll)
 # The known ini keys for config_log_unread (src/diag/config.cpp): regenerated when a source file or CONFIG.md changes.
 set(NXRT_CONFIG_KEYS "${CMAKE_CURRENT_BINARY_DIR}/generated/config_keys.inc")
 file(GLOB_RECURSE NXRT_CONFIG_KEY_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"

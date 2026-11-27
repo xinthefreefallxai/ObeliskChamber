@@ -876,8 +876,12 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
         // sRGB formats have no storage support. The console's image stores write the raw bits (no sRGB encode), which is what a UNORM view
         // of the same image does: storage usage is then allowed through EXTENDED_USAGE when the UNORM partner can be stored to.
         const VkFormat unorm = is_srgb(chosen) ? srgb_partner(chosen) : VK_FORMAT_UNDEFINED;
+        // The image itself (the sRGB format with storage usage and EXTENDED_USAGE) must pass too: Intel's driver for 7th-10th gen graphics
+        // (UHD 630, 31.0.101.2137) accepts the UNORM partner with storage but refuses this combination, and the image was then not made at all
+        // (format 43 "says -11", every sRGB render target missing) and the driver crashed soon after (igvk64.dll, reading 0x298).
         if (!(usage & VK_IMAGE_USAGE_STORAGE_BIT) && unorm != VK_FORMAT_UNDEFINED && (flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) &&
-            device().image_supported(make_desc(s, unorm, usage | VK_IMAGE_USAGE_STORAGE_BIT, flags))) {
+            device().image_supported(make_desc(s, unorm, usage | VK_IMAGE_USAGE_STORAGE_BIT, flags)) &&
+            device().image_supported(make_desc(s, chosen, usage | VK_IMAGE_USAGE_STORAGE_BIT, flags | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT))) {
             flags |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
             usage |= VK_IMAGE_USAGE_STORAGE_BIT;
         }
@@ -2280,7 +2284,8 @@ bool tex_remake_from_bc5(Texture* t, TexGpu* g) {
         add(VK_IMAGE_USAGE_STORAGE_BIT);
         const VkFormat unorm = is_srgb(chosen) ? srgb_partner(chosen) : VK_FORMAT_UNDEFINED;
         if (!(usage & VK_IMAGE_USAGE_STORAGE_BIT) && unorm != VK_FORMAT_UNDEFINED && (flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) &&
-            device().image_supported(make_desc(is, unorm, usage | VK_IMAGE_USAGE_STORAGE_BIT, flags))) {
+            device().image_supported(make_desc(is, unorm, usage | VK_IMAGE_USAGE_STORAGE_BIT, flags)) &&
+            device().image_supported(make_desc(is, chosen, usage | VK_IMAGE_USAGE_STORAGE_BIT, flags | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT))) {   // as above
             flags |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
             usage |= VK_IMAGE_USAGE_STORAGE_BIT;
         }
