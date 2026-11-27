@@ -808,6 +808,8 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     VkPhysicalDevicePageableDeviceLocalMemoryFeaturesEXT apage = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PAGEABLE_DEVICE_LOCAL_MEMORY_FEATURES_EXT};
     VkPhysicalDeviceShaderAtomicFloatFeaturesEXT aaf = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
     VkPhysicalDeviceFaultFeaturesEXT afault = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+    // One general image layout for every use (VK_KHR_unified_image_layouts, 2025): logged for now, so test logs say which drivers offer it.
+    NXLOG_I(kTag, "VK_KHR_unified_image_layouts: %s", has_dext("VK_KHR_unified_image_layouts") ? "offered" : "not offered");
     std::vector<const char*> dev_exts;
     void* chain = nullptr;
     auto add_ext = [&](const char* name, void* feat_struct) {
