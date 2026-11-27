@@ -943,9 +943,9 @@ uint32_t split_min_draws() {
 // the GPU gets work at a steady rate however fast the render thread records. Read once.
 uint32_t split_every_draws() {
     static const uint32_t v = [] {
-        const int64_t n = std::max<int64_t>(0, nxrt::config_get_int("nvn", "split_every_draws", 0));
+        const int64_t n = std::min<int64_t>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "split_every_draws", 0)), 1 << 20);
         if (n > 0) NXLOG_I(kTag, "split_every_draws %lld: submissions go to the GPU every %lld draws", static_cast<long long>(n), static_cast<long long>(n));
-        return static_cast<uint32_t>(std::min<int64_t>(n, 1 << 20));
+        return static_cast<uint32_t>(n);
     }();
     return v;
 }
@@ -962,6 +962,11 @@ void maybe_split() {
     if (g_occ_active >= 0 || g_cw[0].active >= 0 || g_cw[1].active >= 0 || g_xfb_active || g_xfb_began) return;   // queries, stream-out: one buffer
     const uint64_t now = qpc_now();
     if (!split_due(now)) return;
+    if (!split_possible(*F)) {   // batched submits, a pool copy: keep the labels and the open barriers, and wait a whole period again
+        g_split_t0 = now;
+        g_split_draws = 0;
+        return;
+    }
     const int labels = g_dbg_depth;
     for (int i = 0; i < labels; ++i) vkCmdEndDebugUtilsLabelEXT(F->cb);     // labels cannot outlive their command buffer (later pops close nothing)
     if (labels) g_dbg_depth = 0;
