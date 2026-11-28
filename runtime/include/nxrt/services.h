@@ -128,6 +128,9 @@ uint64_t language_code_u64(Language l);  // the same string as the little-endian
 // The host folder game data is served from ([fs] romfs, default "game/romfs" relative to the working directory, resolved at first
 // use) and the folder save data lives in ([fs] save_dir, default %APPDATA%\<game save folder>\save, nxrt/game.h).
 std::string romfs_dir();
+// [fs] prescan (C1): start reading the RomFS folder and the RomFS mods' folders on a background thread (services/fs.cpp). Once [fs] romfs
+// is final; a no-op after the first call or with prescan = false.
+void start_romfs_prescan();
 std::string save_dir();
 // A file of the game's RomFS as the game sees it (a packed .nup or a folder, with RomFS mods and code mods' edits applied), by its path in
 // the image ("/Font/x.bffnt.zst", case sensitive). False when it is not there, is larger than max_bytes or cannot be read.

@@ -953,6 +953,21 @@ void register_fs() {
             installed_aoc().size(), aoc_dir().c_str());
 }
 
+// [fs] prescan (C1): the RomFS folder and the RomFS mods' folders are read on a background thread from here on, while the window and the
+// Vulkan device are made; rom_image() takes the trees (the game opens its RomFS 1.5 to 3 s later). The game's main calls this once [fs]
+// romfs is final (after its --romfs argument), not register_fs: the service tests and --build-pipelines never ask for the RomFS.
+void start_romfs_prescan() {
+    static const bool prescan = config_get_bool("fs", "prescan", true);
+    if (!prescan) return;
+    std::vector<std::string> folders{romfs_dir()};
+    for (const ModInfo& m : mods_list())   // the mods rom_image() lays over the game's files (installed_mods: romfs on in mod.ini)
+        if (m.has_romfs && m.romfs_on) {
+            const std::u8string u = (std::filesystem::u8path(m.dir) / "romfs").u8string();
+            folders.emplace_back(reinterpret_cast<const char*>(u.data()), u.size());
+        }
+    fs::romfs_prescan(folders);
+}
+
 void fs_reset() {
     std::lock_guard<std::mutex> lk(st().mu);
     st().rom.reset();

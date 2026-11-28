@@ -53,6 +53,7 @@
 #include "nxrt/platform.h"
 #include "nxrt/play.h"
 #include "nxrt/runtime.h"
+#include "nxrt/services.h"
 
 #include "ObeliskChamber/ObeliskChamber_game.h"   // the Fortune's Weave game module (runtime/games/ObeliskChamber)
 #include "fefw_cpu.h"         // the CPU features the lifted code needs (per build: FMA3 + AVX or SSE4.2 + POPCNT; CX16), checked first
@@ -540,6 +541,7 @@ int fefw_run(int argc, char** argv) {
             main_nso.c_str(), romfs.c_str());
     // a folder, or a .nup package served as the RomFS image; without either the game aborts in its first fs call (issue 142)
     if (!dir_exists(romfs) && !file_exists(romfs)) die_romfs(romfs);
+    nxrt::services::start_romfs_prescan();   // [fs] prescan: the folder trees are read while the window and the Vulkan device are made
 
     bool play_started = false;
     if (nxrt::config_get_bool("boot", "nvn", true)) {

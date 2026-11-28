@@ -341,6 +341,68 @@ bool scan_tree(Node& dir, std::string& msg) {
     return ok;
 }
 
+// ---- [fs] prescan --------------------------------------------------------------------------------------------------------------
+// Trees read ahead on a background thread (romfs_prescan), by the host path build() gives its root Node (long_path of the absolute
+// path). Never freed: the thread may still be reading when the process ends.
+struct Prescanned {
+    bool done = false;
+    bool ok = false;
+    Node node;
+    std::string msg;
+    double seconds = 0;
+};
+struct PrescanState {
+    std::mutex mu;
+    std::condition_variable cv;
+    std::map<std::wstring, Prescanned> trees;
+    std::atomic<uint32_t> taken{0};
+    std::atomic<bool> started{false};
+};
+PrescanState& prescan_state() {
+    static PrescanState* s = new PrescanState();
+    return *s;
+}
+
+// [fs] prescan: drops every tree no build asked for, read or still being read (its thread then finds no entry and keeps nothing), so a
+// later build reads those folders as they are then.
+void drop_unasked_prescans() {
+    PrescanState& ps = prescan_state();
+    if (!ps.started.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lk(ps.mu);
+    ps.trees.clear();
+}
+
+// The tree of dir.host: the prescanned one when romfs_prescan read (or is reading) it, else scan_tree.
+bool scan_or_prescanned(Node& dir, std::string& msg) {
+    PrescanState& ps = prescan_state();
+    if (ps.started.load(std::memory_order_acquire)) {
+        std::unique_lock<std::mutex> lk(ps.mu);
+        auto it = ps.trees.find(dir.host);
+        if (it != ps.trees.end()) {
+            const auto t0 = std::chrono::steady_clock::now();
+            ps.cv.wait(lk, [&] { return it->second.done; });
+            const double waited = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            Prescanned p = std::move(it->second);
+            ps.trees.erase(it);
+            lk.unlock();
+            ps.taken.fetch_add(1, std::memory_order_relaxed);
+            std::string where;
+            if (!to_utf8(dir.host, where)) where = "?";
+            NXLOG_I("fs", "romfs: folder %s from the start-up read ([fs] prescan: read in %.2f s on its own thread, waited %.2f s)", where.c_str(),
+                    p.seconds, waited);
+            if (!p.ok) {   // read again now: what failed at the start (a file held by a scanner, a cloud file not yet local) may work by now
+                NXLOG_W("fs", "romfs: the start-up read of %s failed (%s): reading it again", where.c_str(), p.msg.c_str());
+                return scan_tree(dir, msg);
+            }
+            p.node.name = dir.name;
+            p.node.path = dir.path;
+            dir = std::move(p.node);
+            return true;
+        }
+    }
+    return scan_tree(dir, msg);
+}
+
 void sort_tree(Node& d) {
     std::sort(d.kids.begin(), d.kids.end(), [](const Node& a, const Node& b) { return a.name < b.name; });
     for (Node& k : d.kids)
@@ -546,7 +608,8 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
     Node root;
     root.is_dir = true;
     root.host = long_path(abs.wstring());
-    if (!(packaged ? scan_nup(host_dir, root, msg) : scan_tree(root, msg))) {
+    if (!(packaged ? scan_nup(host_dir, root, msg) : scan_or_prescanned(root, msg))) {
+        drop_unasked_prescans();
         if (err) *err = msg;
         return false;
     }
@@ -565,7 +628,7 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
         ov.is_dir = true;
         ov.host = long_path(oabs.wstring());
         std::string omsg;
-        if (!scan_tree(ov, omsg)) {
+        if (!scan_or_prescanned(ov, omsg)) {
             NXLOG_W("fs", "romfs overlay '%s' left out: %s", o.c_str(), omsg.c_str());
             continue;
         }
@@ -592,6 +655,7 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
         }
     }
     if (!overlays.empty()) sort_tree(root);
+    drop_unasked_prescans();   // [fs] prescan: the trees this build did not ask for, read or still being read
 
     std::vector<Node*> dirs{&root}, files;
     flatten(root, dirs, files);
@@ -848,6 +912,67 @@ struct RomfsImage::Impl {
         return true;
     }
 };
+
+void romfs_prescan(const std::vector<std::string>& folders) {
+    PrescanState& ps = prescan_state();
+    if (ps.started.exchange(true)) return;
+    std::vector<std::wstring> hosts;
+    {
+        std::lock_guard<std::mutex> lk(ps.mu);
+        for (const std::string& f : folders) {
+            std::wstring w;
+            std::error_code ec;
+            if (f.empty() || nup::is_nup(f) || !to_wide(f, w)) continue;
+            const std::filesystem::path abs = std::filesystem::absolute(std::filesystem::path(w), ec);
+            if (ec || !std::filesystem::is_directory(abs, ec)) continue;
+            const std::wstring host = long_path(abs.wstring());
+            if (ps.trees.count(host)) continue;
+            ps.trees[host];   // pending: a build() that needs it waits
+            hosts.push_back(host);
+        }
+    }
+    if (hosts.empty()) return;
+    NXLOG_I("fs", "romfs: reading %zu folder(s) ahead on a background thread ([fs] prescan)", hosts.size());
+    try {
+    std::thread([hosts] {
+        PrescanState& ps = prescan_state();
+        for (const std::wstring& h : hosts) {
+            Node n;
+            n.is_dir = true;
+            n.host = h;
+            std::string msg;
+            const auto t0 = std::chrono::steady_clock::now();
+            bool ok = false;
+            try {
+                ok = scan_tree(n, msg);
+            } catch (const std::exception& e) {   // no thread for the parallel read, no memory: build() reads the folder again itself
+                ok = false;
+                msg = std::string("start-up read failed: ") + e.what();
+                n = Node();
+            }
+            const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            {
+                std::lock_guard<std::mutex> lk(ps.mu);
+                auto it = ps.trees.find(h);
+                if (it != ps.trees.end()) {
+                    it->second.node = std::move(n);
+                    it->second.ok = ok;
+                    it->second.msg = msg;
+                    it->second.seconds = sec;
+                    it->second.done = true;
+                }
+            }
+            ps.cv.notify_all();
+        }
+    }).detach();
+    } catch (const std::exception& e) {   // no thread: nothing is pending, build() reads the folders itself
+        NXLOG_W("fs", "romfs: the read-ahead thread could not start (%s): folders are read when the game opens its RomFS", e.what());
+        std::lock_guard<std::mutex> lk(ps.mu);
+        ps.trees.clear();
+    }
+}
+
+uint32_t romfs_prescan_taken() { return prescan_state().taken.load(std::memory_order_relaxed); }
 
 RomfsImage::RomfsImage() : p_(std::make_unique<Impl>()) {}
 RomfsImage::~RomfsImage() = default;

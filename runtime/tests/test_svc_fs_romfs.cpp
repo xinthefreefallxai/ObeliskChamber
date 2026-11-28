@@ -801,6 +801,52 @@ NXTEST(romfs_overlays_replace_and_add) {
     CHECK(!img.file_extent("/data/unit.bin", &off, &sz));   // the game's spelling is kept
 }
 
+// [fs] prescan: trees read ahead on the background thread give the same image as reading the folders in build(), each is taken once,
+// and a folder that was not read ahead (a second mod) is read by build() itself. romfs_prescan runs once per process; only this test calls
+// it (the game's main calls start_romfs_prescan, the service tests' register_fs does not).
+NXTEST(romfs_prescan_same_image) {
+    TempTree base, mod1, mod2, mod3;
+    write_host(base.root, {{"/Data/Unit.bin", false, pattern(100, 1)}, {"/Data/Keep.bin", false, pattern(50, 2)}, {"/top.txt", false, pattern(7, 3)}});
+    write_host(mod3.root, {{"/later.bin", false, pattern(9, 8)}});
+    write_host(mod1.root, {{"/data/unit.bin", false, pattern(300, 4)}, {"/Data/New/added.bin", false, pattern(20, 5)}});
+    write_host(mod2.root, {{"/top.txt", false, pattern(11, 7)}});
+    const std::vector<std::string> overlays{utf8(mod1.root), utf8(mod2.root)};
+    RomfsImage plain;
+    std::string err;
+    REQUIRE(plain.build(utf8(base.root), &err, overlays));
+    const uint32_t before = nxrt::services::fs::romfs_prescan_taken();
+    // base and mod1 read ahead (mod2 is not; a missing folder is left out); mod3 is read ahead but this build does not ask for it
+    nxrt::services::fs::romfs_prescan({utf8(base.root), utf8(mod1.root), utf8(mod3.root), utf8(base.root / L"does_not_exist")});
+    RomfsImage pre;
+    REQUIRE(pre.build(utf8(base.root), &err, overlays));
+    CHECK_EQ(nxrt::services::fs::romfs_prescan_taken() - before, 2u);
+    CHECK_EQ(pre.size(), plain.size());
+    CHECK_EQ(pre.stats().files, plain.stats().files);
+    CHECK_EQ(pre.stats().dirs, plain.stats().dirs);
+    CHECK_EQ(pre.stats().overlay_files, plain.stats().overlay_files);
+    check_tree(pre, {{"/Data/Unit.bin", false, pattern(300, 4)},
+                     {"/Data/Keep.bin", false, pattern(50, 2)},
+                     {"/Data/New/added.bin", false, pattern(20, 5)},
+                     {"/top.txt", false, pattern(11, 7)}});
+    std::vector<uint8_t> a(static_cast<size_t>(plain.size())), b(static_cast<size_t>(pre.size()));
+    REQUIRE(plain.read(0, a.data(), a.size()));
+    REQUIRE(pre.read(0, b.data(), b.size()));
+    CHECK(a == b);
+    // taken once: a second build reads the folders again, with the same result
+    RomfsImage again;
+    REQUIRE(again.build(utf8(base.root), &err, overlays));
+    CHECK_EQ(nxrt::services::fs::romfs_prescan_taken() - before, 2u);
+    CHECK_EQ(again.size(), plain.size());
+    // mod3's start-up tree was dropped by the first build (asked for or not): a build after the folder changed sees it as it is now
+    write_host(mod3.root, {{"/later2.bin", false, pattern(5, 9)}});
+    RomfsImage later;
+    REQUIRE(later.build(utf8(base.root), &err, {utf8(mod3.root)}));
+    CHECK_EQ(nxrt::services::fs::romfs_prescan_taken() - before, 2u);
+    uint64_t off = 0, sz = 0;
+    CHECK(later.file_extent("/later.bin", &off, &sz));
+    CHECK(later.file_extent("/later2.bin", &off, &sz));
+}
+
 // Edits (code mods' edit_file): a wanted file is handed over as it stands after the overlays, the image serves the returned bytes with
 // their new size, the files around it keep their content, and a file the editor leaves alone is still read from the host.
 NXTEST(romfs_edits_replace_content_and_size) {
