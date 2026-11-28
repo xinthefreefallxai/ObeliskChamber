@@ -46,6 +46,11 @@ struct Counters {
     std::atomic<uint64_t> textures_created{0}, texture_uploads{0}, texture_upload_bytes{0}, bc7_transcodes{0}, textures_failed{0};
     std::atomic<uint64_t> pools_imported{0}, unresolved_addresses{0}, unsupported_ops{0}, submit_replay_ns{0};
     std::atomic<uint64_t> game_barriers{0}, game_barriers_left_out{0}, dispatch_barriers_left_out{0};   // nvnCommandBufferBarrier replayed (left out: [nvn] game_barriers = tracked); [nvn] dispatch_barriers = tracked
+    // G4: colour feedback loops (a draw samples a colour attachment of its own pass; nvn_replay.cpp feedback_prepare), whatever
+    // [nvn] feedback_loop_layout says: fb_draws such draws, fb_copies / fb_copy_bytes the copies made for them (the copy path),
+    // fb_inplace the sampled textures served in place (the feedback loop layout), fb_inplace_passes the passes begun for those,
+    // fb_fallbacks the textures that took the copy path while the layout path is on
+    std::atomic<uint64_t> fb_draws{0}, fb_copies{0}, fb_copy_bytes{0}, fb_inplace{0}, fb_inplace_passes{0}, fb_fallbacks{0};
 };
 Counters& counters();
 bool counters_ready();   // false until the GPU back end is set up (counters() would read through a null pointer)

@@ -1516,42 +1516,75 @@ void fb_level_range(const ProgLayout& pl, Texture* t, uint32_t* lo, uint32_t* hi
     if (a < z) { *lo = a; *hi = z; }
 }
 
+// Bytes of one texel of the common colour render target formats (the feedback copy counter); 0 when not listed.
+uint32_t fb_texel_bytes(VkFormat f) {
+    switch (f) {
+        case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8_SNORM: case VK_FORMAT_R8_UINT: case VK_FORMAT_R8_SINT: return 1;
+        case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R8G8_SNORM: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8_SINT: case VK_FORMAT_R16_UNORM:
+        case VK_FORMAT_R16_SNORM: case VK_FORMAT_R16_UINT: case VK_FORMAT_R16_SINT: case VK_FORMAT_R16_SFLOAT: case VK_FORMAT_R5G6B5_UNORM_PACK16:
+        case VK_FORMAT_B5G6R5_UNORM_PACK16: case VK_FORMAT_A1R5G5B5_UNORM_PACK16: return 2;
+        case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SNORM: case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_R8G8B8A8_SINT:
+        case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB: case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+        case VK_FORMAT_A2R10G10B10_UNORM_PACK32: case VK_FORMAT_A2B10G10R10_UINT_PACK32: case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+        case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32: case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R16G16_SNORM: case VK_FORMAT_R16G16_UINT:
+        case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R32_UINT: case VK_FORMAT_R32_SINT: case VK_FORMAT_R32_SFLOAT: return 4;
+        case VK_FORMAT_R16G16B16A16_UNORM: case VK_FORMAT_R16G16B16A16_SNORM: case VK_FORMAT_R16G16B16A16_UINT: case VK_FORMAT_R16G16B16A16_SINT:
+        case VK_FORMAT_R16G16B16A16_SFLOAT: case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32_SFLOAT: return 8;
+        case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_R32G32B32A32_SINT: case VK_FORMAT_R32G32B32A32_SFLOAT: return 16;
+        default: return 0;
+    }
+}
+
+std::atomic<uint64_t> g_fb_copies_n{0};   // for the hitch counter (feedback_copies)
+
 void feedback_prepare(const ProgLayout& pl) {
     g_fb_use.clear();
-    bool any = false;
+    // the textures the draw samples that are also its colour attachments (multisampled ones keep the dummy, as before)
+    static std::vector<Texture*> cands;   // render thread; kept from call to call
+    cands.clear();
     for (const BindingDesc& d : pl.bindings) {
         if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
         if (b.nvn.source != NvnSource::SamplerBinding && b.nvn.source != NvnSource::HandleInUniform) continue;
         TexResolved tmp;
-        struct { Texture* tex; } const r = {resolve_texture_ref(d, tmp).tex};   // only the texture is used below
-        if (!r.tex || !tex_gpu(r.tex) || !is_color_feedback(r.tex) || r.tex->b.samples > 1 || g_fb_use.count(r.tex)) continue;
-        any = true;
-        Texture* c = feedback_clone(r.tex);
+        Texture* const t = resolve_texture_ref(d, tmp).tex;   // only the texture is used below
+        if (!t || !tex_gpu(t) || !is_color_feedback(t) || t->b.samples > 1 || std::find(cands.begin(), cands.end(), t) != cands.end()) continue;
+        cands.push_back(t);
+    }
+    g_fb_seen = !cands.empty();
+    if (cands.empty()) return;
+    counters().fb_draws.fetch_add(1, std::memory_order_relaxed);
+    for (Texture* t : cands) {
+        Texture* c = feedback_clone(t);
         if (!c) continue;
         uint32_t lv_lo = 0, lv_hi = 0;
-        fb_level_range(pl, r.tex, &lv_lo, &lv_hi);
+        fb_level_range(pl, t, &lv_lo, &lv_hi);
         end_pass();
-        tex_ensure_exact(r.tex, *F);                                      // storage the game wrote since the image was made reaches the copy too
-        tex_transition(r.tex, *F, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);   // the next pass moves it back to the attachment layout and loads it
+        tex_ensure_exact(t, *F);                                      // storage the game wrote since the image was made reaches the copy too
+        tex_transition(t, *F, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);   // the next pass moves it back to the attachment layout and loads it
         tex_transition(c, *F, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         std::vector<VkImageCopy> regions;
+        uint64_t bytes = 0;
+        const uint32_t texel = fb_texel_bytes(tex_vk_format(t)) ? fb_texel_bytes(tex_vk_format(t)) : (t->fmt && t->fmt->bytes ? t->fmt->bytes : 4u);
         for (uint32_t lv = lv_lo; lv < lv_hi; ++lv) {
-            const VkExtent3D e = tex_image_extent(r.tex, lv);
+            const VkExtent3D e = tex_image_extent(t, lv);
             VkImageCopy rc = {};
-            rc.srcSubresource = {tex_aspect(r.tex), lv, 0, tex_layers(r.tex)};
+            rc.srcSubresource = {tex_aspect(t), lv, 0, tex_layers(t)};
             rc.dstSubresource = {tex_aspect(c), lv, 0, tex_layers(c)};
             rc.extent = e;
             regions.push_back(rc);
+            bytes += static_cast<uint64_t>(e.width) * e.height * e.depth * tex_layers(t) * texel;
         }
-        vkCmdCopyImage(F->cb, tex_image(r.tex), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, tex_image(c), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<uint32_t>(regions.size()), regions.data());
+        vkCmdCopyImage(F->cb, tex_image(t), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, tex_image(c), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<uint32_t>(regions.size()), regions.data());
         tex_mark_gpu_written(c);
         tex_transition(c, *F, tex_sampled_layout(c));
-        g_fb_use[r.tex] = c;
+        g_fb_use[t] = c;
         counters().copies.fetch_add(1, std::memory_order_relaxed);
+        counters().fb_copies.fetch_add(1, std::memory_order_relaxed);
+        counters().fb_copy_bytes.fetch_add(bytes, std::memory_order_relaxed);
+        g_fb_copies_n.fetch_add(1, std::memory_order_relaxed);
         gstamp("feedback copy");
     }
-    g_fb_seen = any;
 }
 
 void flush_compute_out(int why = kOutGpuReader);       // compute shadows (below): results of direct compute bindings go back to the pool
@@ -1662,6 +1695,8 @@ bool paced_play(uint64_t grace) {
 }
 namespace {
 const bool g_pool_deferred_hitch = (nxrt::hitch_add_counter("pool_uploads_deferred", []() -> uint64_t { return g_pool_uploads_deferred.load(std::memory_order_relaxed); }), true);
+// G4: the feedback loop copies, on the hitch lines too
+const bool g_fb_hitch = (nxrt::hitch_add_counter("feedback_copies", []() -> uint64_t { return g_fb_copies_n.load(std::memory_order_relaxed); }), true);
 
 // Makes the textures a draw samples current (uploaded, in their sampled layout) and the storage images it binds writable (GENERAL).
 // Ends the pass when it has to touch images. The depth attachment itself is left to the pass.

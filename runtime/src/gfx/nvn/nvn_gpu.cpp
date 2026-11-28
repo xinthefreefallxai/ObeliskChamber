@@ -106,6 +106,7 @@ struct GpuStats {
     uint64_t last_end = 0;                // GPU ticks: end of the last part read back (submissions are read back in submission order)
     uint64_t presents0 = 0;
     uint64_t c0[14] = {};
+    uint64_t fb0[6] = {};                 // G4: the feedback loop counters at the window's start (fb_counters)
     std::map<std::string, std::pair<double, uint64_t>> gp;   // label -> GPU ns, intervals
 };
 
@@ -595,6 +596,17 @@ uint64_t stats_counter(int i) {
     }
 }
 
+// G4: the feedback loop counters (Counters::fb_*), in the order of the gpustats line below.
+void fb_counters(uint64_t out[6]) {
+    const Counters& c = g->ctr;
+    out[0] = c.fb_draws.load(std::memory_order_relaxed);
+    out[1] = c.fb_copies.load(std::memory_order_relaxed);
+    out[2] = c.fb_copy_bytes.load(std::memory_order_relaxed);
+    out[3] = c.fb_inplace.load(std::memory_order_relaxed);
+    out[4] = c.fb_inplace_passes.load(std::memory_order_relaxed);
+    out[5] = c.fb_fallbacks.load(std::memory_order_relaxed);
+}
+
 // [prof] gpu_stats: one submission's GPU time, added to the frame it was recorded in; a full window of frames is logged.
 void stats_add(uint64_t frame, double ns, double busy_ns) {
     GpuStats& st = g->stats;
@@ -605,6 +617,7 @@ void stats_add(uint64_t frame, double ns, double busy_ns) {
         }
         if (st.cur_frame == UINT64_MAX) {
             for (int i = 0; i < 14; ++i) st.c0[i] = stats_counter(i);
+            fb_counters(st.fb0);
             st.gp.clear();
         }
         st.cur_frame = frame;
@@ -644,6 +657,16 @@ void stats_add(uint64_t frame, double ns, double busy_ns) {
     NXLOG_I("nvn.gpustats", "pass ends by caller %s", site_report(kSitePassEnd, frames, 12).c_str());
     NXLOG_I("nvn.gpustats", "passes reopened on the same targets by caller %s", site_report(kSiteReopen, frames, 12).c_str());
     NXLOG_I("nvn.gpustats", "narrowed barriers by caller %s", site_report(kSiteNarrow, frames, 12).c_str());
+    {
+        // G4: draws that sample their own colour attachment, and how they were served: copies (and bytes copied) on the copy path, textures
+        // sampled in place on the layout path ([nvn] feedback_loop_layout) and the passes begun for those, textures that fell back to the copy
+        uint64_t fb1[6];
+        fb_counters(fb1);
+        auto pfb = [&](int i) { return static_cast<double>(fb1[i] - st.fb0[i]) / frames; };
+        NXLOG_I("nvn.gpustats", "feedback loops per frame: draws %.2f, copies %.2f (%.2f MB), in place %.2f (passes begun %.2f), fallbacks %.2f",
+                pfb(0), pfb(1), pfb(2) / (1024.0 * 1024.0), pfb(3), pfb(4), pfb(5));
+        std::copy(fb1, fb1 + 6, st.fb0);
+    }
     if (nxrt::config_get_bool("nvn", "prep_ahead", false)) {
         static uint64_t done0 = 0, learned0 = 0;
         const uint64_t done = prep_ahead_done(), learned = prep_ahead_learned();
