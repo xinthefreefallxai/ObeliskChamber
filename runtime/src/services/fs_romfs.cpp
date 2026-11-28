@@ -645,6 +645,14 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
         }
     }
     if (!overlays.empty()) sort_tree(root);
+    {   // [fs] prescan: the trees this build did not ask for are dropped (a later build reads its folders as they are then); one still being
+        // read is left to its thread, which finds no entry and drops it
+        PrescanState& ps = prescan_state();
+        if (ps.started.load(std::memory_order_acquire)) {
+            std::lock_guard<std::mutex> lk(ps.mu);
+            for (auto it = ps.trees.begin(); it != ps.trees.end();) it = it->second.done ? ps.trees.erase(it) : std::next(it);
+        }
+    }
 
     std::vector<Node*> dirs{&root}, files;
     flatten(root, dirs, files);
@@ -922,6 +930,7 @@ void romfs_prescan(const std::vector<std::string>& folders) {
     }
     if (hosts.empty()) return;
     NXLOG_I("fs", "romfs: reading %zu folder(s) ahead on a background thread ([fs] prescan)", hosts.size());
+    try {
     std::thread([hosts] {
         PrescanState& ps = prescan_state();
         for (const std::wstring& h : hosts) {
@@ -946,6 +955,11 @@ void romfs_prescan(const std::vector<std::string>& folders) {
             ps.cv.notify_all();
         }
     }).detach();
+    } catch (const std::exception& e) {   // no thread: nothing is pending, build() reads the folders itself
+        NXLOG_W("fs", "romfs: the read-ahead thread could not start (%s): folders are read when the game opens its RomFS", e.what());
+        std::lock_guard<std::mutex> lk(ps.mu);
+        ps.trees.clear();
+    }
 }
 
 uint32_t romfs_prescan_taken() { return prescan_state().taken.load(std::memory_order_relaxed); }

@@ -802,7 +802,8 @@ NXTEST(romfs_overlays_replace_and_add) {
 }
 
 // [fs] prescan: trees read ahead on the background thread give the same image as reading the folders in build(), each is taken once,
-// and a folder that was not read ahead (a second mod) is read by build() itself. romfs_prescan runs once per process: only this test calls it.
+// and a folder that was not read ahead (a second mod) is read by build() itself. romfs_prescan runs once per process; only this test calls
+// it (the game's main calls start_romfs_prescan, the service tests' register_fs does not).
 NXTEST(romfs_prescan_same_image) {
     TempTree base, mod1, mod2;
     write_host(base.root, {{"/Data/Unit.bin", false, pattern(100, 1)}, {"/Data/Keep.bin", false, pattern(50, 2)}, {"/top.txt", false, pattern(7, 3)}});
