@@ -210,6 +210,18 @@ static inline double fp_maxmin64(double x, double y, int is_min, int num) {
     return x;
 }
 
+/* NX_FP_NANCHECK (MEASUREMENT ONLY, branch claude/nan-ceiling; never ship 0): 1 is the exact path below. 0 skips the NaN fix-ups of
+ * the scalar arithmetic here and of the packed operations in neon.h (nx_nanps), so a NaN result keeps the x86 bit pattern instead of the
+ * Arm one. It measures the most the checks can cost (Weak_Points_Fix_Plan C2). */
+#ifndef NX_FP_NANCHECK
+#define NX_FP_NANCHECK 0
+#endif
+#if NX_FP_NANCHECK
+#define NX_FP_NUM(r) ((r) == (r))
+#else
+#define NX_FP_NUM(r) 1
+#endif
+
 /* ---- Exact NaN rules of the arithmetic (FPCR.DN = 0). The host result is used whenever it is not a NaN: x86 SSE /
  * the C library already give the IEEE value for every non-NaN case. When the host result is a NaN, the result is
  * recomputed from the operand bit patterns, in Arm operand order: the first signalling NaN operand, quietened (quiet
@@ -251,19 +263,19 @@ static inline double fp_nan_result64(int n, double x0, double x1, double x2) {
     return fp_from_bits64(res);
 }
 
-static inline float fp_add32(float a, float b) { float r = a + b; return r == r ? r : fp_nan_result32(2, a, b, 0); }
-static inline float fp_sub32(float a, float b) { float r = a - b; return r == r ? r : fp_nan_result32(2, a, b, 0); }
-static inline float fp_mul32(float a, float b) { float r = a * b; return r == r ? r : fp_nan_result32(2, a, b, 0); }
-static inline float fp_div32(float a, float b) { float r = a / b; return r == r ? r : fp_nan_result32(2, a, b, 0); }
-static inline float fp_sqrt32(float a) { float r = sqrtf(a); return r == r ? r : fp_nan_result32(1, a, 0, 0); }
+static inline float fp_add32(float a, float b) { float r = a + b; return NX_FP_NUM(r) ? r : fp_nan_result32(2, a, b, 0); }
+static inline float fp_sub32(float a, float b) { float r = a - b; return NX_FP_NUM(r) ? r : fp_nan_result32(2, a, b, 0); }
+static inline float fp_mul32(float a, float b) { float r = a * b; return NX_FP_NUM(r) ? r : fp_nan_result32(2, a, b, 0); }
+static inline float fp_div32(float a, float b) { float r = a / b; return NX_FP_NUM(r) ? r : fp_nan_result32(2, a, b, 0); }
+static inline float fp_sqrt32(float a) { float r = sqrtf(a); return NX_FP_NUM(r) ? r : fp_nan_result32(1, a, 0, 0); }
 static inline float fp_neg32(float a) { return fp_from_bits32(fp_bits32(a) ^ 0x80000000u); }
 static inline float fp_abs32(float a) { return fp_from_bits32(fp_bits32(a) & 0x7fffffffu); }
 
-static inline double fp_add64(double a, double b) { double r = a + b; return r == r ? r : fp_nan_result64(2, a, b, 0); }
-static inline double fp_sub64(double a, double b) { double r = a - b; return r == r ? r : fp_nan_result64(2, a, b, 0); }
-static inline double fp_mul64(double a, double b) { double r = a * b; return r == r ? r : fp_nan_result64(2, a, b, 0); }
-static inline double fp_div64(double a, double b) { double r = a / b; return r == r ? r : fp_nan_result64(2, a, b, 0); }
-static inline double fp_sqrt64(double a) { double r = sqrt(a); return r == r ? r : fp_nan_result64(1, a, 0, 0); }
+static inline double fp_add64(double a, double b) { double r = a + b; return NX_FP_NUM(r) ? r : fp_nan_result64(2, a, b, 0); }
+static inline double fp_sub64(double a, double b) { double r = a - b; return NX_FP_NUM(r) ? r : fp_nan_result64(2, a, b, 0); }
+static inline double fp_mul64(double a, double b) { double r = a * b; return NX_FP_NUM(r) ? r : fp_nan_result64(2, a, b, 0); }
+static inline double fp_div64(double a, double b) { double r = a / b; return NX_FP_NUM(r) ? r : fp_nan_result64(2, a, b, 0); }
+static inline double fp_sqrt64(double a) { double r = sqrt(a); return NX_FP_NUM(r) ? r : fp_nan_result64(1, a, 0, 0); }
 static inline double fp_neg64(double a) { return fp_from_bits64(fp_bits64(a) ^ 0x8000000000000000ull); }
 static inline double fp_abs64(double a) { return fp_from_bits64(fp_bits64(a) & 0x7fffffffffffffffull); }
 
@@ -271,7 +283,7 @@ static inline double fp_abs64(double a) { return fp_from_bits64(fp_bits64(a) & 0
  * NaN addend with an invalid product (inf * 0) gives the default NaN, not the addend. */
 static inline float fp_fma32(float n, float m, float a) {
     float r = nx_fmaf(n, m, a);
-    if (r == r) return r;
+    if (NX_FP_NUM(r)) return r;
     uint32_t bn = fp_bits32(n), bm = fp_bits32(m), ba = fp_bits32(a);
     if (fp_nan32b(ba) && !fp_snan32b(ba) &&
         ((fp_inf32b(bn) && fp_zero32b(bm)) || (fp_zero32b(bn) && fp_inf32b(bm))))
@@ -280,7 +292,7 @@ static inline float fp_fma32(float n, float m, float a) {
 }
 static inline double fp_fma64(double n, double m, double a) {
     double r = nx_fmad(n, m, a);
-    if (r == r) return r;
+    if (NX_FP_NUM(r)) return r;
     uint64_t bn = fp_bits64(n), bm = fp_bits64(m), ba = fp_bits64(a);
     if (fp_nan64b(ba) && !fp_snan64b(ba) &&
         ((fp_inf64b(bn) && fp_zero64b(bm)) || (fp_zero64b(bn) && fp_inf64b(bm))))

@@ -146,7 +146,11 @@ NX_HOT void nx_stps(V128 *d, __m128 r, int n) {
     _mm_storeu_ps(d->f, r);
 }
 NX_HOT int nx_lanes(int n) { return (1 << n) - 1; }
+#if NX_FP_NANCHECK
 NX_HOT int nx_nanps(__m128 r, int n) { return _mm_movemask_ps(_mm_cmpunord_ps(r, r)) & nx_lanes(n); }
+#else
+NX_HOT int nx_nanps(__m128 r, int n) { (void)r; (void)n; return 0; }   /* measurement only: see fpexact.h NX_FP_NANCHECK */
+#endif
 NX_HOT __m128 nx_signps(void) { return _mm_castsi128_ps(_mm_set1_epi32((int)0x80000000u)); }
 
 /* The packed form of f3s on lanes 0..n-1 of a and b (acc: the destination's old value, for the accumulating forms). Returns 1 when it
