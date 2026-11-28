@@ -262,6 +262,56 @@ NX_SLOW void v_f1v_ref(V128 *d, const V128 *pn, int op, int dbl, int n) {
     nx_vst(d, r);
 }
 
+#ifdef NX_X86_SIMD
+/* Exact fast paths for the single-precision v_f1v forms that had none (Tier C1, CPU_Translation_Optimization_Plan L2). Checked
+ * against v_f1v_ref over every 32-bit input in every lane (tools: recomp/tests or the session's v3test; 0 mismatches). NX_FP_FAST = 0
+ * sends them to the element code again. */
+#ifndef NX_FP_FAST
+#define NX_FP_FAST 1
+#endif
+/* FCVTZS: cvttps2dq gives 0x80000000 for NaN and out of range; +overflow becomes 0x7fffffff and NaN 0, without a branch. */
+NX_HOT __m128i nx_cvtzs_ps(__m128 a) {
+    __m128i r = _mm_cvttps_epi32(a);
+    __m128i m = _mm_cmpeq_epi32(r, _mm_set1_epi32((int)0x80000000u));
+    __m128i pos = _mm_castps_si128(_mm_cmpge_ps(a, _mm_setzero_ps()));      /* false for NaN */
+    r = _mm_xor_si128(r, _mm_and_si128(m, pos));
+    return _mm_andnot_si128(_mm_castps_si128(_mm_cmpunord_ps(a, a)), r);
+}
+/* FCVTZU: negative and NaN give 0, 2^32 and above 0xffffffff. */
+NX_HOT __m128i nx_cvtzu_ps(__m128 a) {
+    const __m128 two31 = _mm_set1_ps(2147483648.0f);
+    __m128 lo = _mm_max_ps(a, _mm_setzero_ps());                 /* NaN -> 0 (maxps returns the second operand) */
+    __m128i r1 = _mm_cvttps_epi32(lo);
+    __m128 hi = _mm_sub_ps(lo, two31);
+    __m128i r2 = _mm_xor_si128(_mm_cvttps_epi32(hi), _mm_set1_epi32((int)0x80000000u));
+    __m128i big = _mm_castps_si128(_mm_cmpge_ps(lo, two31));
+    __m128i r = _mm_or_si128(_mm_andnot_si128(big, r1), _mm_and_si128(big, r2));
+    __m128i ovf = _mm_castps_si128(_mm_cmpge_ps(lo, _mm_set1_ps(4294967296.0f)));
+    return _mm_or_si128(r, ovf);
+}
+/* UCVTF from u32: both 16-bit halves convert exactly, one rounding in the add. */
+NX_HOT __m128 nx_ucvtf_ps(__m128i x) {
+    __m128 hi = _mm_mul_ps(_mm_cvtepi32_ps(_mm_srli_epi32(x, 16)), _mm_set1_ps(65536.0f));
+    __m128 lo = _mm_cvtepi32_ps(_mm_and_si128(x, _mm_set1_epi32(0xffff)));
+    return _mm_add_ps(hi, lo);
+}
+/* FRSQRTE / FRECPE of one single's bits: the normal cases inline (fp_rsqrte_bits / fp_recpe_bits with their special cases taken out),
+ * everything else (zero, subnormal, infinity, NaN, negative for RSQRTE, the two largest exponents for RECPE) through the generic code. */
+NX_HOT uint32_t nx_rsqrte_bits32(uint32_t b) {
+    const uint32_t e = (b >> 23) & 0xff;
+    if (__builtin_expect((b >> 31) == 0 && e - 1 < 254, 1)) {
+        const uint32_t scaled = (e & 1) == 0 ? (0x100 | ((b >> 15) & 0xff)) : (0x80 | ((b >> 16) & 0x7f));
+        return (((380 - e) >> 1) << 23) | ((recip_sqrt_estimate(scaled) & 0xff) << 15);
+    }
+    return (uint32_t)fp_rsqrte_bits(b, 0);
+}
+NX_HOT uint32_t nx_recpe_bits32(uint32_t b) {
+    const uint32_t e = (b >> 23) & 0xff;
+    if (__builtin_expect(e - 1 < 252, 1)) return (b & 0x80000000u) | ((253 - e) << 23) | ((recip_estimate(0x100 | ((b >> 15) & 0xff)) & 0xff) << 15);
+    return (uint32_t)fp_recpe_bits(b, 0);
+}
+#endif
+
 NX_HOT void v_f1v(V128 *d, const V128 *pn, int op, int dbl, int n) {
 #ifdef NX_X86_SIMD
     if (!dbl) {
@@ -273,6 +323,18 @@ NX_HOT void v_f1v(V128 *d, const V128 *pn, int op, int dbl, int n) {
         case F1_NEG: r = _mm_xor_ps(a, nx_signps()); break;
         case F1_SQRT: r = _mm_sqrt_ps(a); ok = !nx_nanps(r, n); break;
         case F1_SCVTF: r = _mm_cvtepi32_ps(_mm_castps_si128(a)); break;
+#if NX_FP_FAST
+        case F1_UCVTF: r = nx_ucvtf_ps(_mm_castps_si128(a)); break;
+        case F1_CVTZS: r = _mm_castsi128_ps(nx_cvtzs_ps(a)); break;
+        case F1_CVTZU: r = _mm_castsi128_ps(nx_cvtzu_ps(a)); break;
+        case F1_RSQRTE: case F1_RECPE: {
+            V128 t;
+            _mm_storeu_ps(t.f, a);
+            for (int i = 0; i < n; i++) t.w[i] = op == F1_RSQRTE ? nx_rsqrte_bits32(t.w[i]) : nx_recpe_bits32(t.w[i]);
+            r = _mm_loadu_ps(t.f);
+            break;
+        }
+#endif
         case F1_CMEQ0: r = _mm_cmpeq_ps(a, zero); break;
         case F1_CMGT0: r = _mm_cmpgt_ps(a, zero); break;
         case F1_CMGE0: r = _mm_cmpge_ps(a, zero); break;
