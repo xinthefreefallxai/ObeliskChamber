@@ -28,10 +28,11 @@ struct RomfsEdits {
 // [fs] prescan (C1, start-up): reads the trees of these host folders (the game's RomFS folder, the RomFS mods' folders) on a background
 // thread, so the first build() that names one of them takes the tree read there instead of reading the folder again. The game opens its
 // RomFS a second or two after the start, after the window and the Vulkan device are made; the read overlaps with that. A folder build()
-// asks for while it is still being read is waited for; one it never asks for is dropped. Each tree is taken once (a later build reads the
-// folder again). Folders that are not there, and .nup packages, are left out. Call once; later calls are ignored.
+// asks for while it is still being read is waited for; one it never asks for is dropped, read or not; a start-up read that failed is read
+// again by build(). Each tree is taken once (a later build reads the folder again). Folders that are not there, and .nup packages, are
+// left out. Call once; later calls are ignored.
 void romfs_prescan(const std::vector<std::string>& folders);
-// Folders romfs_prescan read that build() took / is waiting for now (tests).
+// Folders romfs_prescan read that build() has taken (tests).
 uint32_t romfs_prescan_taken();
 
 class RomfsImage {

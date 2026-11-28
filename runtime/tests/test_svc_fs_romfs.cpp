@@ -805,8 +805,9 @@ NXTEST(romfs_overlays_replace_and_add) {
 // and a folder that was not read ahead (a second mod) is read by build() itself. romfs_prescan runs once per process; only this test calls
 // it (the game's main calls start_romfs_prescan, the service tests' register_fs does not).
 NXTEST(romfs_prescan_same_image) {
-    TempTree base, mod1, mod2;
+    TempTree base, mod1, mod2, mod3;
     write_host(base.root, {{"/Data/Unit.bin", false, pattern(100, 1)}, {"/Data/Keep.bin", false, pattern(50, 2)}, {"/top.txt", false, pattern(7, 3)}});
+    write_host(mod3.root, {{"/later.bin", false, pattern(9, 8)}});
     write_host(mod1.root, {{"/data/unit.bin", false, pattern(300, 4)}, {"/Data/New/added.bin", false, pattern(20, 5)}});
     write_host(mod2.root, {{"/top.txt", false, pattern(11, 7)}});
     const std::vector<std::string> overlays{utf8(mod1.root), utf8(mod2.root)};
@@ -814,8 +815,8 @@ NXTEST(romfs_prescan_same_image) {
     std::string err;
     REQUIRE(plain.build(utf8(base.root), &err, overlays));
     const uint32_t before = nxrt::services::fs::romfs_prescan_taken();
-    // base and mod1 read ahead (mod2 is not; a missing folder is left out)
-    nxrt::services::fs::romfs_prescan({utf8(base.root), utf8(mod1.root), utf8(base.root / L"does_not_exist")});
+    // base and mod1 read ahead (mod2 is not; a missing folder is left out); mod3 is read ahead but this build does not ask for it
+    nxrt::services::fs::romfs_prescan({utf8(base.root), utf8(mod1.root), utf8(mod3.root), utf8(base.root / L"does_not_exist")});
     RomfsImage pre;
     REQUIRE(pre.build(utf8(base.root), &err, overlays));
     CHECK_EQ(nxrt::services::fs::romfs_prescan_taken() - before, 2u);
@@ -836,6 +837,14 @@ NXTEST(romfs_prescan_same_image) {
     REQUIRE(again.build(utf8(base.root), &err, overlays));
     CHECK_EQ(nxrt::services::fs::romfs_prescan_taken() - before, 2u);
     CHECK_EQ(again.size(), plain.size());
+    // mod3's start-up tree was dropped by the first build (asked for or not): a build after the folder changed sees it as it is now
+    write_host(mod3.root, {{"/later2.bin", false, pattern(5, 9)}});
+    RomfsImage later;
+    REQUIRE(later.build(utf8(base.root), &err, {utf8(mod3.root)}));
+    CHECK_EQ(nxrt::services::fs::romfs_prescan_taken() - before, 2u);
+    uint64_t off = 0, sz = 0;
+    CHECK(later.file_extent("/later.bin", &off, &sz));
+    CHECK(later.file_extent("/later2.bin", &off, &sz));
 }
 
 // Edits (code mods' edit_file): a wanted file is handed over as it stands after the overlays, the image serves the returned bytes with

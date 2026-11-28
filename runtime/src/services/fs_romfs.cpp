@@ -363,6 +363,15 @@ PrescanState& prescan_state() {
     return *s;
 }
 
+// [fs] prescan: drops every tree no build asked for, read or still being read (its thread then finds no entry and keeps nothing), so a
+// later build reads those folders as they are then.
+void drop_unasked_prescans() {
+    PrescanState& ps = prescan_state();
+    if (!ps.started.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lk(ps.mu);
+    ps.trees.clear();
+}
+
 // The tree of dir.host: the prescanned one when romfs_prescan read (or is reading) it, else scan_tree.
 bool scan_or_prescanned(Node& dir, std::string& msg) {
     PrescanState& ps = prescan_state();
@@ -381,9 +390,9 @@ bool scan_or_prescanned(Node& dir, std::string& msg) {
             if (!to_utf8(dir.host, where)) where = "?";
             NXLOG_I("fs", "romfs: folder %s from the start-up read ([fs] prescan: read in %.2f s on its own thread, waited %.2f s)", where.c_str(),
                     p.seconds, waited);
-            if (!p.ok) {
-                msg = p.msg;
-                return false;
+            if (!p.ok) {   // read again now: what failed at the start (a file held by a scanner, a cloud file not yet local) may work by now
+                NXLOG_W("fs", "romfs: the start-up read of %s failed (%s): reading it again", where.c_str(), p.msg.c_str());
+                return scan_tree(dir, msg);
             }
             p.node.name = dir.name;
             p.node.path = dir.path;
@@ -600,6 +609,7 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
     root.is_dir = true;
     root.host = long_path(abs.wstring());
     if (!(packaged ? scan_nup(host_dir, root, msg) : scan_or_prescanned(root, msg))) {
+        drop_unasked_prescans();
         if (err) *err = msg;
         return false;
     }
@@ -645,14 +655,7 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
         }
     }
     if (!overlays.empty()) sort_tree(root);
-    {   // [fs] prescan: the trees this build did not ask for are dropped (a later build reads its folders as they are then); one still being
-        // read is left to its thread, which finds no entry and drops it
-        PrescanState& ps = prescan_state();
-        if (ps.started.load(std::memory_order_acquire)) {
-            std::lock_guard<std::mutex> lk(ps.mu);
-            for (auto it = ps.trees.begin(); it != ps.trees.end();) it = it->second.done ? ps.trees.erase(it) : std::next(it);
-        }
-    }
+    drop_unasked_prescans();   // [fs] prescan: the trees this build did not ask for, read or still being read
 
     std::vector<Node*> dirs{&root}, files;
     flatten(root, dirs, files);
@@ -939,7 +942,14 @@ void romfs_prescan(const std::vector<std::string>& folders) {
             n.host = h;
             std::string msg;
             const auto t0 = std::chrono::steady_clock::now();
-            const bool ok = scan_tree(n, msg);
+            bool ok = false;
+            try {
+                ok = scan_tree(n, msg);
+            } catch (const std::exception& e) {   // no thread for the parallel read, no memory: build() reads the folder again itself
+                ok = false;
+                msg = std::string("start-up read failed: ") + e.what();
+                n = Node();
+            }
             const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             {
                 std::lock_guard<std::mutex> lk(ps.mu);
