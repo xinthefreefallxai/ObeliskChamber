@@ -24,6 +24,7 @@ void nx_site_inline(Ctx *, uint64_t) { std::abort(); }
 int nx_site_midhook(Ctx *, uint64_t) { std::abort(); }
 int nx_hook_entry(Ctx *, uint64_t) { std::abort(); }
 void stx_diag(Ctx *, uint64_t, uint64_t, uint64_t, uint64_t, int) {}
+void nx_hle_memzero(uint64_t dst, uint64_t n) { std::memset(reinterpret_cast<void *>(dst), 0, n); }   // [memory] zero_skip (runtime memory.cpp)
 void nx_catch_call(Ctx *, void (*)(Ctx *, uint64_t)) { std::abort(); }
 // game-build/fefw/src/fefw_hle.cpp (compiled into fefw.exe with the lifted libraries; recomp cxx.h): the lifted body is the fallback
 void nx_hle_zstd_multiframe(Ctx *c, void (*orig)(Ctx *)) { orig(c); }
