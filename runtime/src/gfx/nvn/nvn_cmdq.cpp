@@ -74,10 +74,24 @@ void wake_worker() {
     if (g_q->sleeping.load(std::memory_order_seq_cst)) WakeByAddressSingle(&g_q->pub);
 }
 
+uint64_t g_rewinds = 0;      // [nvn] replay_ring_rewind: pads written (the 10 s line)
+bool g_rewind_due = false;   // producer (render thread): the last sync found the ring empty
+
 // Room for a record of `payload` bytes; returns where the payload goes. q_commit() publishes it.
 uint8_t* q_begin(Exec exec, size_t payload) {
     Queue& q = *g_q;
     const size_t total = align16(sizeof(Hdr) + payload);
+    if (g_rewind_due) {   // [nvn] replay_ring_rewind: the ring was empty at the last sync; a pad the worker skips takes us to offset 0
+        g_rewind_due = false;
+        const size_t at = static_cast<size_t>(q.head % kRingBytes);
+        if (at != 0) {
+            Hdr* p = reinterpret_cast<Hdr*>(q.mem + at);
+            p->exec = nullptr;
+            p->size = static_cast<uint32_t>(kRingBytes - at);
+            q.head += kRingBytes - at;
+            ++g_rewinds;
+        }
+    }
     uint64_t pos = q.head % kRingBytes;
     const size_t pad = pos + total > kRingBytes ? kRingBytes - static_cast<size_t>(pos) : 0;
     // the consumer's tail is read only when the space it was last known to leave runs out (it is written by the worker: reading it for
@@ -165,34 +179,18 @@ void worker_main() {
 
 // [nvn] replay_ring_rewind (B3, default off until A/B): once a sync finds the ring empty, the next record starts at offset 0 again (a pad
 // record the worker skips covers the rest of the ring), so every submission's records reuse the same cache lines and pages at the start
-// of the 32 MB ring instead of walking through all of it. Read once.
+// of the 32 MB ring instead of walking through all of it. The sync only marks it; q_begin writes the pad in front of the next record, so
+// a sync with no record after it never waits for the worker to step over a pad. Read once.
 bool ring_rewind_on() {
     static const bool on = config_get_bool("nvn", "replay_ring_rewind", false);
     return on;
 }
-uint64_t g_rewinds = 0;
-
-// The ring is empty (tail == head): pad to the end so the next record is at offset 0.
-void ring_rewind(Queue& q) {
-    const size_t pos = static_cast<size_t>(q.head % kRingBytes);
-    if (pos == 0) return;
-    Hdr* h = reinterpret_cast<Hdr*>(q.mem + pos);
-    h->exec = nullptr;
-    h->size = static_cast<uint32_t>(kRingBytes - pos);
-    q.head += kRingBytes - pos;
-    ++g_rewinds;
-    // published now, so the worker steps over it before the next records need the room (it runs nothing for it)
-    q.unpublished = 0;
-    q.pub.store(q.head, std::memory_order_seq_cst);
-    wake_worker();
-}
-
 void do_sync() {
     Queue& q = *g_q;
     const uint64_t want = q.head;
     if (q.unpublished) q_publish();
     if (q.tail.load(std::memory_order_acquire) >= want) {
-        if (ring_rewind_on() && q.tail.load(std::memory_order_acquire) == q.head) ring_rewind(q);
+        if (ring_rewind_on()) g_rewind_due = q.tail.load(std::memory_order_acquire) == q.head;
         return;
     }
     const auto t0 = std::chrono::steady_clock::now();
@@ -205,7 +203,7 @@ void do_sync() {
     }
     ++q.syncs;
     q.sync_ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
-    if (ring_rewind_on() && q.tail.load(std::memory_order_acquire) == q.head) ring_rewind(q);
+    if (ring_rewind_on()) g_rewind_due = q.tail.load(std::memory_order_acquire) == q.head;
 }
 
 // ---- the real entry points ------------------------------------------------------------------------------------------------------
@@ -761,6 +759,7 @@ void install() {
 #undef CMDQ_WRAP_SYNC
     }
     q.head = q.rec_start = q.tail_seen = 0;
+    g_rewind_due = false;
     q.unpublished = 0;
     g_batch = static_cast<uint32_t>(std::clamp<int64_t>(config_get_int("nvn", "replay_batch", 16), 1, 256));
     q.pub.store(0);
