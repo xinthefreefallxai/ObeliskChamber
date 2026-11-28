@@ -167,6 +167,14 @@ if(FEFW_THINLTO)
     if(FEFW_LTO_JOBS)
         target_link_options(fefw PRIVATE "/opt:lldltojobs=${FEFW_LTO_JOBS}")
     endif()
+    # FEFW_LTO_LINK_FLAGS (environment, measurement builds): more lld-link options for the ThinLTO back end, which makes the lifted code's
+    # machine code (codegen options given at compile time do not survive in bitcode), e.g. /opt:lldlto=3 or
+    # /mllvm:-x86-branches-within-32B-boundaries. Read on every configure; unset: none.
+    if(DEFINED ENV{FEFW_LTO_LINK_FLAGS} AND NOT "$ENV{FEFW_LTO_LINK_FLAGS}" STREQUAL "")
+        separate_arguments(_fefw_lto_extra WINDOWS_COMMAND "$ENV{FEFW_LTO_LINK_FLAGS}")
+        target_link_options(fefw PRIVATE ${_fefw_lto_extra})
+        message(STATUS "fefw: ThinLTO link options from FEFW_LTO_LINK_FLAGS: ${_fefw_lto_extra}")
+    endif()
     message(STATUS "fefw: ThinLTO link (cache ${CMAKE_BINARY_DIR}/lto-cache, jobs ${FEFW_LTO_JOBS})")
 endif()
 # Profile-guided builds (docs/PGO.md): lifted libraries built with -fprofile-instr-generate name LLVM's profile runtime (clang_rt.profile*.lib) as a
