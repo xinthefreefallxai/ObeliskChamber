@@ -14,6 +14,9 @@ extern "C" {
 void g_7500856130(Ctx *__restrict c) { g_750078df00(c); }
 void g_750087bbe0(Ctx *__restrict c) { g_75007bbc80(c); }
 }
+// cxx.h hle_memset hands large zero fills to the runtime; here a plain memset
+extern "C" void nx_hle_memzero(uint64_t dst, uint64_t n) { std::memset(reinterpret_cast<void *>(dst), 0, n); }
+
 // unused runtime hooks the header declares
 extern "C" void call_indirect(Ctx *, uint64_t) { abort(); }
 extern "C" void guest_trap(const char *, uint64_t) { abort(); }

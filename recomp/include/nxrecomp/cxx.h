@@ -121,6 +121,8 @@ raw:
 extern "C" void nx_hle_zstd_multiframe(Ctx *NX_NOESC c, void (*orig)(Ctx *));
 extern "C" void nx_hle_cull_view_box(Ctx *NX_NOESC c, void (*orig)(Ctx *));          // FEFW_HLE_CULL: 0 lifted, 1 native, 2 both compared
 extern "C" void nx_hle_cull_cylinder_box(Ctx *NX_NOESC c, void (*orig)(Ctx *));
+// In the runtime (nxrt::mem::heap_zero_fill, [memory] zero_skip): a memset with 0 of `n` bytes at `dst`.
+extern "C" void nx_hle_memzero(uint64_t dst, uint64_t n);
 
 namespace nx {
 
@@ -704,7 +706,12 @@ NX_INLINE void hle_memmove(Ctx *c) {
 }
 NX_INLINE void hle_memset(Ctx *c) {
     if (hle_null_area(c->x[0])) [[unlikely]] return;
-    std::memset(reinterpret_cast<void *>(c->x[0]), static_cast<int>(static_cast<uint8_t>(c->x[1])), c->x[2]);
+    const uint8_t v = static_cast<uint8_t>(c->x[1]);
+    if (v == 0 && c->x[2] >= (64u << 10)) {   // large zero fills: the runtime may leave heap pages never used alone ([memory] zero_skip)
+        nx_hle_memzero(c->x[0], c->x[2]);
+        return;
+    }
+    std::memset(reinterpret_cast<void *>(c->x[0]), static_cast<int>(v), c->x[2]);
 }
 NX_INLINE void hle_strlen(Ctx *c) {
     if (hle_null_area(c->x[0])) [[unlikely]] { c->x[0] = 0; return; }
