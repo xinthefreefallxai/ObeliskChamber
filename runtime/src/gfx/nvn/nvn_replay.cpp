@@ -972,12 +972,19 @@ void maybe_split() {
 // G4 ([nvn] feedback_loop_layout): `fb_want` names the colour attachments the draw samples in place (feedback_prepare); they are attached in
 // the feedback loop layout, in a pass that begins after a full barrier. `fb_fresh`: the draw samples what its pass writes, so an open
 // feedback pass serves it only while it has no draws (nvn_feedback_loop.h fb_pass_serves). A plain draw or clear never runs in a feedback pass.
+std::vector<Texture*> g_fbl_tex;   // G4: the textures the current draw samples in place (feedback_in_place; their real content goes in here)
 bool ensure_pass(bool depth_ro = false, bool writes = false, uint32_t fb_want = 0, bool fb_fresh = false) {
     const VkExtent2D bare = writes && !S.ncolor && !S.depth_tex ? viewport_extent() : VkExtent2D{0, 0};
     if (P.open && targets_match() && P.depth_ro == depth_ro && bare.width <= P.extent.width && bare.height <= P.extent.height &&
         fb_pass_serves(true, P.fb_mask, fb_want, fb_fresh, g_pass_draws))
         return true;
     end_pass(fb_want == 0);   // a feedback pass: the full barrier, so its draws sample what every earlier pass and draw wrote
+    if (fb_want) {
+        // storage the game wrote since the images were made goes in before the pass loads them (as the copy path does before its copy)
+        for (Texture* t : g_fbl_tex) tex_ensure_exact(t, *F);
+        for (uint32_t i = 0; i < S.ncolor && i < 8; ++i)
+            if (((fb_want >> i) & 1u) && S.color_tex[i]) tex_ensure_exact(S.color_tex[i].get(), *F);
+    }
     if (g_last_end.valid) {
         bool same = g_last_end.ncolor == S.ncolor;
         for (uint32_t i = 0; i < S.ncolor && same; ++i) same = g_last_end.color[i] == make_target(S.color_tex[i].get(), S.color_view[i], S.color_has_view[i]);
@@ -1575,6 +1582,20 @@ uint32_t fb_texel_bytes(VkFormat f) {
     }
 }
 
+// The attachment view of a feedback pass keeps the feedback loop usage only when its format can be sampled and rendered to (view_for), and
+// VkRenderingAttachmentInfo in the feedback loop layout needs that usage (VUID-VkRenderingAttachmentInfo-imageView-10780). Cached per format.
+bool fb_format_ok(VkFormat f) {
+    static std::unordered_map<int, bool> known;   // render thread
+    const auto it = known.find(static_cast<int>(f));
+    if (it != known.end()) return it->second;
+    VkFormatProperties fp = {};
+    vkGetPhysicalDeviceFormatProperties(device().physical(), f, &fp);
+    constexpr VkFormatFeatureFlags kNeed = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+    const bool ok = f != VK_FORMAT_UNDEFINED && (fp.optimalTilingFeatures & kNeed) == kNeed;
+    known.emplace(static_cast<int>(f), ok);
+    return ok;
+}
+
 // G4, [nvn] feedback_loop_layout (default false; vk_device.cpp enables VK_EXT_attachment_feedback_loop_layout for it, never with [gfx]
 // intel_compat): the layout path is in use when the device has the extension and its feature.
 bool fbl_on() {
@@ -1608,10 +1629,12 @@ bool feedback_in_place(const ProgLayout& pl, const std::vector<Texture*>& cands)
             c.att_level = tg.level;
             c.att_layer = tg.layer;
             c.att_layers = tg.layers;
+            c.att_view_ok = fb_format_ok(tex_attachment_format(a, tg.view_format));
             const FbLoopDecision dd = fb_loop_decide(c);
             if (dd.path != FbLoopPath::Layout) {
                 counters().fb_fallbacks.fetch_add(cands.size(), std::memory_order_relaxed);
-                if (first_time_key("fbl-fallback " + std::to_string(t->id)))
+                static std::unordered_set<uint32_t> fell_back;   // logged once per texture, without a string per draw
+                if (fell_back.insert(t->id).second)
                     NXLOG_I(kTag, "feedback loop: texture %u (%s %dx%d) takes the copy: %s", t->id, t->fmt ? t->fmt->name : "?", t->b.width, t->b.height, dd.why);
                 return false;
             }
@@ -1624,17 +1647,15 @@ bool feedback_in_place(const ProgLayout& pl, const std::vector<Texture*>& cands)
             return false;
         }
         fresh = fresh || overlap;
-        if (first_time_key("fbl " + std::to_string(t->id)))
+        static std::unordered_set<uint32_t> logged;
+        if (logged.insert(t->id).second)
             NXLOG_I(kTag, "feedback loop: texture %u (%s %dx%d, %u levels) sampled in place: levels %u-%u layers %u-%u, attachment level %u layer %u+%u%s",
                     t->id, t->fmt ? t->fmt->name : "?", t->b.width, t->b.height, tex_levels(t), c.lv_lo, c.lv_hi, c.ly_lo, c.ly_hi, c.att_level, c.att_layer,
                     c.att_layers, overlap ? " (reads what it writes: a pass of its own)" : "");
     }
-    // A pass that cannot serve the draw ends here with the full barrier, before the real content of the images goes in (as the copy does);
-    // ensure_pass then begins the feedback pass. One that can stays open (no barrier, no copy, no new pass).
-    if (!(P.open && targets_match() && fb_pass_serves(true, P.fb_mask, want, fresh, g_pass_draws))) {
-        end_pass();
-        for (Texture* t : cands) tex_ensure_exact(t, *F);
-    }
+    // ensure_pass decides whether the open pass serves the draw (fb_pass_serves, with the depth and extent checks); one that does not ends
+    // with the full barrier, the real content of the images goes in, and the feedback pass begins
+    g_fbl_tex.assign(cands.begin(), cands.end());
     g_fbl_want = want;
     g_fbl_fresh = fresh;
     counters().fb_inplace.fetch_add(cands.size(), std::memory_order_relaxed);
@@ -1646,6 +1667,7 @@ void feedback_prepare(const ProgLayout& pl) {
     g_fb_use.clear();
     g_fbl_want = 0;
     g_fbl_fresh = false;
+    g_fbl_tex.clear();
     // the textures the draw samples that are also its colour attachments (multisampled ones keep the dummy, as before)
     static std::vector<Texture*> cands;   // render thread; kept from call to call
     cands.clear();
@@ -6758,6 +6780,7 @@ void replay_begin_submit(Frame& f) {
     g_fb_seen = false;
     g_fbl_want = 0;
     g_fbl_fresh = false;
+    g_fbl_tex.clear();
     g_key_dummy_binding = 0;
     g_split_t0 = qpc_now();
     g_split_draws = 0;
@@ -6869,6 +6892,7 @@ void replay_abort_submit() {
     g_fb_use.clear();
     g_fbl_want = 0;
     g_fbl_fresh = false;
+    g_fbl_tex.clear();
     F = nullptr;
 }
 

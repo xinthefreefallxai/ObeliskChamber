@@ -55,6 +55,7 @@ inline bool fb_ranges_overlap(uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1
 struct FbLoopCase {
     bool supported = false;         // the device has the extension and attachmentFeedbackLoopLayout, and the switch is on
     bool image_usage = false;       // the image was made with VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT
+    bool att_view_ok = true;        // the attachment view's format can be sampled and rendered to (so the view keeps that usage)
     uint32_t samples = 1;           // of the image
     bool exact_ranges = true;       // false: the subresource ranges below are not known exactly (3D, cube, a level drop): overlap assumed
     uint32_t att_level = 0;         // the attachment's level and layers [att_layer, att_layer + att_layers)
@@ -75,6 +76,7 @@ inline FbLoopDecision fb_loop_decide(const FbLoopCase& c) {
     FbLoopDecision d;
     if (!c.supported) { d.why = "off or not supported"; return d; }
     if (!c.image_usage) { d.why = "image made without the feedback loop usage"; return d; }
+    if (!c.att_view_ok) { d.why = "the attachment view's format cannot be sampled (its view has no feedback loop usage)"; return d; }
     if (c.samples > 1) { d.why = "multisampled"; return d; }   // (the copy path leaves those to the dummy as before)
     d.path = FbLoopPath::Layout;
     d.overlap = !c.exact_ranges ||

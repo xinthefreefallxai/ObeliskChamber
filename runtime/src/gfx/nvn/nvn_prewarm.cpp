@@ -297,8 +297,16 @@ bool rec_of(const GraphicsKey& key, Rec* r) {
 
 // The key of a record with stand-in shaders from the shader cache, and its layout (the shared one of the same descriptors, so the same
 // VkPipelineLayout the game's program gets). Any thread; takes no lock of this file.
+// G4: a record made while [nvn] feedback_loop_layout was in use (GraphicsKey::fb_loop) on a device without the layout path: no draw of
+// this session asks for that key, so it is not built (the file keeps it for a session with the switch on).
+bool rec_unwanted(const Rec& r) {
+    constexpr size_t kFbLoopAt = offsetof(GraphicsKey, fb_loop) - kStageBytes;
+    static_assert(kFbLoopAt < kRestBytes, "fb_loop is among the recorded key bytes");
+    return r.rest[kFbLoopAt] != 0 && !fb_loop_usage_on();
+}
+
 bool stub_key(const Rec& r, GraphicsKey& k, const ProgLayout*& pl) {
-    if (!shader_cache().is_open()) return false;
+    if (!shader_cache().is_open() || rec_unwanted(r)) return false;
     std::memset(&k, 0, sizeof k);
     for (int i = 0; i < 3; ++i) {
         if (!r.h[i]) continue;
@@ -628,13 +636,16 @@ void prewarm_init() {
             auto j = std::make_shared<Job>();
             j->rec = g_recs[i];
             j->digest = digest_of(j->rec.h, j->rec.rest);
+            if (rec_unwanted(j->rec)) j->state = 2;              // never queued, promoted or rewarmed (G4)
             g_rec_jobs[i] = j;
             g_jobs[j->digest].push_back(j);
         }
         // The boot queue: most recently used first (the session a draw last used the key in; keys from before the .seen file count as
         // session 0), then in the order they were first used. Only the first `budget` go in; the rest when the game sets their programs.
-        std::vector<size_t> order(g_recs.size());
-        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::vector<size_t> order;
+        order.reserve(g_recs.size());
+        for (size_t i = 0; i < g_recs.size(); ++i)
+            if (g_rec_jobs[i]->state == 0) order.push_back(i);
         auto last = [](const std::shared_ptr<Job>& j) {
             auto it = g_seen.find(j->digest);
             return it == g_seen.end() ? 0u : it->second;

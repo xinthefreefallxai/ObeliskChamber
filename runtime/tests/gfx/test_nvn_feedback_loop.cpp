@@ -56,6 +56,9 @@ NXTEST(unsupported_or_unfit_takes_the_copy) {
     c.image_usage = false;
     CHECK(fb_loop_decide(c).path == FbLoopPath::Copy);
     c = pointwise();
+    c.att_view_ok = false;   // the attachment view's format cannot be sampled: its view loses the usage
+    CHECK(fb_loop_decide(c).path == FbLoopPath::Copy);
+    c = pointwise();
     c.samples = 4;
     CHECK(fb_loop_decide(c).path == FbLoopPath::Copy);
     CHECK(fb_loop_decide(c).why[0] != '\0');
