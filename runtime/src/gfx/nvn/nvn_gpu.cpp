@@ -663,8 +663,8 @@ void stats_add(uint64_t frame, double ns, double busy_ns) {
         uint64_t fb1[6];
         fb_counters(fb1);
         auto pfb = [&](int i) { return static_cast<double>(fb1[i] - st.fb0[i]) / frames; };
-        NXLOG_I("nvn.gpustats", "feedback loops per frame: draws %.2f, copies %.2f (%.2f MB), in place %.2f (passes begun %.2f), fallbacks %.2f",
-                pfb(0), pfb(1), pfb(2) / (1024.0 * 1024.0), pfb(3), pfb(4), pfb(5));
+        NXLOG_I("nvn.gpustats", "feedback loops per frame: draws %.2f, copies %.2f (%.2f MB), in place %.2f (passes begun %.2f), fallbacks %.2f | layout path %s",
+                pfb(0), pfb(1), pfb(2) / (1024.0 * 1024.0), pfb(3), pfb(4), pfb(5), fb_loop_usage_on() ? "on" : "off");
         std::copy(fb1, fb1 + 6, st.fb0);
     }
     if (nxrt::config_get_bool("nvn", "prep_ahead", false)) {
@@ -1043,6 +1043,12 @@ void layout_scope(VkImageLayout layout, bool src, VkPipelineStageFlags2* stage, 
         case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
             *stage = kShaderStages;
             *access = src ? VK_ACCESS_2_NONE : VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+            return;
+        case VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT:
+            // G4 ([nvn] feedback_loop_layout): a colour attachment that its own draws also sample
+            *stage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | kShaderStages;
+            *access = src ? VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
+                          : (VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
             return;
         case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
             *stage = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;

@@ -137,6 +137,9 @@ struct DeviceFeatures {
     bool dynamic_rendering_unused_attachments = false;
     bool transform_feedback = false, transform_feedback_queries = false;   // VK_EXT_transform_feedback (the feedback queries: transformFeedbackQueries)
     bool index_type_uint8 = false;        // VK_EXT/KHR_index_type_uint8 (8-bit index buffers, indexTypeUint8)
+    // VK_EXT_attachment_feedback_loop_layout with attachmentFeedbackLoopLayout: enabled only when [nvn] feedback_loop_layout asks for it
+    // (and not with [gfx] intel_compat); draws that sample their own colour attachment then do so in place (nvn_replay.cpp, G4)
+    bool attachment_feedback_loop_layout = false;
     bool device_fault = false;                // VK_EXT_device_fault: after a device loss the driver can say what faulted (vk_renderer.cpp)
     bool gpu_checkpoints = false;             // VK_NV_device_diagnostic_checkpoints, enabled by [gfx] gpu_checkpoints (nvn_checkpoints.cpp)
     bool buffer_marker_amd = false;           // VK_AMD_buffer_marker, enabled by [gfx] gpu_checkpoints where the NVIDIA extension is missing (#157)

@@ -1058,6 +1058,9 @@ VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& lay
     gi.pColorBlendState = &cb;
     gi.pDynamicState = pipeline_dynamic_state();
     gi.layout = layout.layout;
+    // G4: a key recorded with the feedback loop flag (the prewarm file) on a device without the extension builds the plain pipeline,
+    // which no draw there asks for under this key
+    if (key.fb_loop && device().features().attachment_feedback_loop_layout) gi.flags |= VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
     VkPipeline pipe = VK_NULL_HANDLE;
     const VkResult r = create_graphics_pipeline_tracked(vkdev(), g_cache, &gi, &pipe);
     t_build_result = r;

@@ -903,6 +903,10 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
                         static_cast<unsigned>(usage));
         }
     }
+    // G4 ([nvn] feedback_loop_layout): a single-sample colour render target may be sampled by a draw that renders to it; it is then put in
+    // VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT, which needs this usage. Added last, so a combination the GPU refuses costs no
+    // other usage. Some drivers keep such images uncompressed (RADV turns DCC off for them): the reason the switch is off by default.
+    if (fb_loop_usage_on() && (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) && s.samples <= 1) add(VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT);
     g->usage = usage;
     g->create_flags = flags;
     g->create_known = true;
@@ -1507,13 +1511,18 @@ VkImageView view_for(TexGpu& g, VkImageViewType type, uint32_t base_level, uint3
     // A view takes the usages of its image; a format of the view that cannot do one of them (an sRGB view cannot be stored to) restricts it.
     VkImageViewUsageCreateInfo uc = {VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
     {
-        constexpr VkImageUsageFlags kViewUsages = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        // (G4: the feedback loop usage stays on a restricted view while the view can still be both sampled and rendered to, which that
+        // usage needs; the replay's views of a feedback draw are then usable in the feedback loop layout)
+        constexpr VkImageUsageFlags kViewUsages = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                                  VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
         VkFormatProperties fp = {};
         vkGetPhysicalDeviceFormatProperties(device().physical(), fmt, &fp);
         VkImageUsageFlags u = g.usage & kViewUsages;
         if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) u &= ~VK_IMAGE_USAGE_SAMPLED_BIT;
         if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) u &= ~VK_IMAGE_USAGE_STORAGE_BIT;
         if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) u &= ~VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        if ((u & (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) != (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
+            u &= ~VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
         if (u != (g.usage & kViewUsages) && !(aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))) {
             uc.usage = u;
             vi.pNext = &uc;
@@ -2297,6 +2306,7 @@ bool tex_remake_from_bc5(Texture* t, TexGpu* g) {
             usage |= VK_IMAGE_USAGE_STORAGE_BIT;
         }
     }
+    if (fb_loop_usage_on() && (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) && is.samples <= 1) add(VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT);   // as above (G4)
     gfx::ImageDesc nd = make_desc(is, chosen, usage, flags);
     if (g->demoted_ms) nd.small_pool = true;
     // [gfx] defrag: movable as create_texture_gpu makes it (a sampled-only 2D image), with its owner, so a pass can move the new image
@@ -3630,6 +3640,13 @@ VkFormat tex_attachment_format(Texture* t, VkFormat view_format) {
 bool tex_has_storage(Texture* t) {
     TexGpu* g = tex_or_null(t);
     return g && (g->usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
+}
+
+bool fb_loop_usage_on() { return device().features().attachment_feedback_loop_layout; }
+
+bool tex_has_fb_loop_usage(Texture* t) {
+    TexGpu* g = tex_or_null(t);
+    return g && (g->usage & VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT) != 0;
 }
 
 VkFormat tex_storage_format(Texture* t, VkFormat requested) {

@@ -95,7 +95,10 @@ struct GraphicsKey {
     uint8_t xfb = 0;                            // the vertex shader runs with transform feedback (captured outputs, no fragment stage)
     uint8_t dual_src = 0;                       // a blend factor of an enabled attachment reads the second source (fragment output moved to Location 0, Index 1)
     uint8_t no_out = 0;                         // the pass has no colour attachment: the fragment shader's outputs become private variables
-    uint8_t pad[0 + 1] = {};
+    // G4 ([nvn] feedback_loop_layout): the pass has colour attachments in VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT (a draw that
+    // samples its own target): the pipeline is made with VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT, whole (never linked from
+    // pipeline libraries). In the byte that was padding, so the prewarm key file keeps its record layout (old records read 0).
+    uint8_t fb_loop = 0;
     // Tessellation control and evaluation stages (null: none). Last, so that the prewarm key file keeps its record layout (it records the bytes
     // before these and never a tessellated key). A key with them has topology PATCH_LIST and patch_control_points = the NVN patch size.
     const ShaderInfo* tess[2] = {};

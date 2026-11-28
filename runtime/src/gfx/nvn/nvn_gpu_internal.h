@@ -358,6 +358,10 @@ VkImageView tex_attachment_view(Texture* t, uint32_t level, uint32_t layer, uint
 VkFormat tex_attachment_format(Texture* t, VkFormat view_format);
 // The image can be bound as a storage image (created with NVN_TEXTURE_FLAGS_IMAGE).
 bool tex_has_storage(Texture* t);
+// G4: the device has VK_EXT_attachment_feedback_loop_layout ([nvn] feedback_loop_layout): colour render targets get its usage. Whether one
+// image has it (made while that was so, and the GPU took the combination).
+bool fb_loop_usage_on();
+bool tex_has_fb_loop_usage(Texture* t);
 VkFormat tex_storage_format(Texture* t, VkFormat requested);   // the view format a storage binding uses: the UNORM partner of an sRGB image
 // The layout a texture is sampled in: SHADER_READ_ONLY_OPTIMAL, or DEPTH_STENCIL_READ_ONLY_OPTIMAL for depth and stencil formats (so
 // the same layout serves a depth texture that is also the read-only depth attachment of the pass).

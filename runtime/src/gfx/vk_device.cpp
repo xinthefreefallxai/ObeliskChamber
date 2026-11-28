@@ -37,6 +37,7 @@
 #include "extras/framegen.h"
 #include "extras/framegen_ffx.h"
 #include "extras/temporal.h"
+#include "nvn/nvn_feedback_loop.h"
 
 #include <vk_mem_alloc.h>
 
@@ -809,6 +810,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     VkPhysicalDevicePageableDeviceLocalMemoryFeaturesEXT apage = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PAGEABLE_DEVICE_LOCAL_MEMORY_FEATURES_EXT};
     VkPhysicalDeviceShaderAtomicFloatFeaturesEXT aaf = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
     VkPhysicalDeviceFaultFeaturesEXT afault = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+    VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT afbl = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT};
     std::vector<const char*> dev_exts;
     void* chain = nullptr;
     auto add_ext = [&](const char* name, void* feat_struct) {
@@ -843,6 +845,12 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     const bool x_vids = add_ext(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME, &avids);
     const bool x_drua = add_ext(VK_EXT_DYNAMIC_RENDERING_UNUSED_ATTACHMENTS_EXTENSION_NAME, &adrua);
     const bool x_tfb = add_ext(VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME, &atfb);
+    // G4, [nvn] feedback_loop_layout (default false): a draw that samples its own colour attachment does so in the feedback loop layout
+    // instead of sampling a copy made before it (nvn_replay.cpp feedback_prepare). Asked for only when the switch is on, so the device
+    // stays as before otherwise; [gfx] intel_compat (decided again below, with the same key and default) keeps it off.
+    const ::nxrt::nvn::FbLoopMode fbl_mode = ::nxrt::nvn::parse_fb_loop_mode(config_get_str("nvn", "feedback_loop_layout", "false"));
+    const bool fbl_intel = quirk_key("intel_compat", props_.vendorID == 0x8086);
+    const bool x_fbl = ::nxrt::nvn::fb_loop_wanted(fbl_mode, fbl_intel) && add_ext(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME, &afbl);
     // 8-bit index buffers (the EXT and the KHR extension share the feature struct)
     const bool x_u8 = add_ext(VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME, &au8) || add_ext("VK_KHR_index_type_uint8", &au8);
     // pipelines linked from separately compiled shader parts (nvn_gpl.cpp): needs VK_KHR_pipeline_library next to the extension itself
@@ -960,6 +968,20 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     features_.dynamic_rendering_unused_attachments = x_drua && adrua.dynamicRenderingUnusedAttachments;
     features_.transform_feedback = x_tfb && atfb.transformFeedback;
     features_.index_type_uint8 = x_u8 && au8.indexTypeUint8;
+    features_.attachment_feedback_loop_layout = x_fbl && afbl.attachmentFeedbackLoopLayout;
+    if (fbl_mode != ::nxrt::nvn::FbLoopMode::Off) {
+        if (features_.attachment_feedback_loop_layout)
+            NXLOG_I(kTag, "feedback loops ([nvn] feedback_loop_layout = %s): VK_EXT_attachment_feedback_loop_layout, a draw samples its own colour "
+                          "attachment in place (no copy)", ::nxrt::nvn::fb_loop_mode_name(fbl_mode));
+        else if (fbl_intel)
+            NXLOG_I(kTag, "feedback loops ([nvn] feedback_loop_layout = %s): off with [gfx] intel_compat, the copy before the draw as before",
+                    ::nxrt::nvn::fb_loop_mode_name(fbl_mode));
+        else if (fbl_mode == ::nxrt::nvn::FbLoopMode::On)
+            NXLOG_W(kTag, "feedback loops ([nvn] feedback_loop_layout = true): this GPU or driver has no VK_EXT_attachment_feedback_loop_layout "
+                          "(extension %d, feature %d): the copy before the draw as before", x_fbl ? 1 : 0, afbl.attachmentFeedbackLoopLayout ? 1 : 0);
+        else
+            NXLOG_I(kTag, "feedback loops ([nvn] feedback_loop_layout = auto): not supported here, the copy before the draw");
+    }
     features_.buffer_float32_atomic_add = x_af && aaf.shaderBufferFloat32AtomicAdd;
     features_.device_fault = x_fault && afault.deviceFault;
     features_.gpu_checkpoints = x_ckpt;
