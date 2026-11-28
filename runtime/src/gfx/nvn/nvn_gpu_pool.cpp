@@ -975,9 +975,19 @@ struct PresentCap {
 };
 PresentCap g_cap_new{"mirror_new_per_present"}, g_cap_chunks{"mirror_chunks_per_present"};   // render thread
 
+// [nvn] mirror_for_fast (B2, default off until A/B): the walk over the pool's chunks and spans for a copy buffer (below) runs only while
+// some pool has one (g_have_copies). Every chunk or span with a copy buffer is in g_copies, and g_have_copies is !g_copies.empty(); both
+// change on the render thread, which is the only caller of mirror_for. Read once.
+bool mirror_for_fast() {
+    static const bool on = config_get_bool("nvn", "mirror_for_fast", false);
+    return on;
+}
+
 Mirror* mirror_for(PoolGpu* pg, MemoryPool* mp) {
-    for (const PoolChunk& c : pg->chunks) if (c.copy.buffer) return nullptr;
-    for (const PoolChunk& c : pg->spans) if (c.copy.buffer) return nullptr;
+    if (!mirror_for_fast() || g_have_copies.load(std::memory_order_relaxed)) {
+        for (const PoolChunk& c : pg->chunks) if (c.copy.buffer) return nullptr;
+        for (const PoolChunk& c : pg->spans) if (c.copy.buffer) return nullptr;
+    }
     if (pg->mirror || pg->mirror_tried) return pg->mirror;
     if (!mp || mp->is_virtual || mp->is_shader_code || mp->dead.load() || pg->failed) { pg->mirror_tried = true; return nullptr; }
     // Tracked copies change the protection of the CPU's view of the pages. With [nvn] pool_view = false the GPU import is that same view;
@@ -1453,6 +1463,13 @@ void storage_probe(uint64_t gpu_address, uint64_t size, bool vertex) {
     g_sto_bytes[s][row] += size;
 }
 
+// [nvn] resolve_read_lean (B1, default off until A/B): a bind served by the device-local copy skips the per-page page_valid check that only
+// counted hot-copy binds for the stats line (that count then stays 0). Read once.
+bool resolve_read_lean() {
+    static const bool on = config_get_bool("nvn", "resolve_read_lean", false);
+    return on;
+}
+
 BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use) {
     MemoryPool* mp = nullptr;
     PoolGpu* pg = nullptr;
@@ -1475,9 +1492,13 @@ BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use) {
         for (uint64_t p = first; p <= last; ++p) bit_put(m->used, p, true);
         if (hot_copy_on()) {
             const uint8_t sb = static_cast<uint8_t>(1u << std::min<uint32_t>(g_sub_idx, 7));
-            bool via_tv = false;
-            for (uint64_t p = first; p <= last; ++p) { if (m->sig[static_cast<size_t>(p)]) m->sig[static_cast<size_t>(p)] |= sb; via_tv |= !page_valid(*m, p); }
-            if (via_tv) ++g_hotcopy_binds;
+            if (resolve_read_lean()) {   // B1: the page_valid check per page only fed the hot-copy bind count of the stats line
+                for (uint64_t p = first; p <= last; ++p) if (m->sig[static_cast<size_t>(p)]) m->sig[static_cast<size_t>(p)] |= sb;
+            } else {
+                bool via_tv = false;
+                for (uint64_t p = first; p <= last; ++p) { if (m->sig[static_cast<size_t>(p)]) m->sig[static_cast<size_t>(p)] |= sb; via_tv |= !page_valid(*m, p); }
+                if (via_tv) ++g_hotcopy_binds;
+            }
         }
         g_st_dev_binds.fetch_add(1, std::memory_order_relaxed);
         g_use_dev[use]++;

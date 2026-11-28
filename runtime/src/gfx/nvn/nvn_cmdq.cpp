@@ -163,11 +163,38 @@ void worker_main() {
     diag_unregister_thread();
 }
 
+// [nvn] replay_ring_rewind (B3, default off until A/B): once a sync finds the ring empty, the next record starts at offset 0 again (a pad
+// record the worker skips covers the rest of the ring), so every submission's records reuse the same cache lines and pages at the start
+// of the 32 MB ring instead of walking through all of it. Read once.
+bool ring_rewind_on() {
+    static const bool on = config_get_bool("nvn", "replay_ring_rewind", false);
+    return on;
+}
+uint64_t g_rewinds = 0;
+
+// The ring is empty (tail == head): pad to the end so the next record is at offset 0.
+void ring_rewind(Queue& q) {
+    const size_t pos = static_cast<size_t>(q.head % kRingBytes);
+    if (pos == 0) return;
+    Hdr* h = reinterpret_cast<Hdr*>(q.mem + pos);
+    h->exec = nullptr;
+    h->size = static_cast<uint32_t>(kRingBytes - pos);
+    q.head += kRingBytes - pos;
+    ++g_rewinds;
+    // published now, so the worker steps over it before the next records need the room (it runs nothing for it)
+    q.unpublished = 0;
+    q.pub.store(q.head, std::memory_order_seq_cst);
+    wake_worker();
+}
+
 void do_sync() {
     Queue& q = *g_q;
     const uint64_t want = q.head;
     if (q.unpublished) q_publish();
-    if (q.tail.load(std::memory_order_acquire) >= want) return;
+    if (q.tail.load(std::memory_order_acquire) >= want) {
+        if (ring_rewind_on() && q.tail.load(std::memory_order_acquire) == q.head) ring_rewind(q);
+        return;
+    }
     const auto t0 = std::chrono::steady_clock::now();
     for (int i = 0; q.tail.load(std::memory_order_acquire) < want; ++i) {
         if (i < 4000) _mm_pause();
@@ -178,6 +205,7 @@ void do_sync() {
     }
     ++q.syncs;
     q.sync_ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+    if (ring_rewind_on() && q.tail.load(std::memory_order_acquire) == q.head) ring_rewind(q);
 }
 
 // ---- the real entry points ------------------------------------------------------------------------------------------------------
@@ -667,11 +695,12 @@ void maybe_log_stats() {
     const double secs = std::chrono::duration<double>(now - g_stat_t0).count();
     if (secs < 10.0) return;
     NXLOG_I(kTag, "deferred recording: %.1f s, %llu submissions: %.0f records/s (%.1f MB/s), %llu waits for the worker (%.2f ms/s waited), "
-            "worker busy %.1f ms/s, %llu ring-full waits, %llu calls run directly (unknown pNext)",
+            "worker busy %.1f ms/s, %llu ring-full waits, %llu calls run directly (unknown pNext), %llu ring rewinds ([nvn] replay_ring_rewind)",
             secs, static_cast<unsigned long long>(g_stat_scopes), q.records / secs, q.bytes / secs / 1048576.0, static_cast<unsigned long long>(q.syncs),
             q.sync_ns / 1e6 / secs, q.worker_ns.exchange(0) / 1e6 / secs, static_cast<unsigned long long>(q.full_waits),
-            static_cast<unsigned long long>(q.fallbacks));
+            static_cast<unsigned long long>(q.fallbacks), static_cast<unsigned long long>(g_rewinds));
     q.records = q.bytes = q.syncs = q.sync_ns = q.full_waits = q.fallbacks = 0;
+    g_rewinds = 0;
     g_stat_scopes = 0;
     g_stat_t0 = now;
 }
