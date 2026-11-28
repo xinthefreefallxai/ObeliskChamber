@@ -976,8 +976,9 @@ struct PresentCap {
 PresentCap g_cap_new{"mirror_new_per_present"}, g_cap_chunks{"mirror_chunks_per_present"};   // render thread
 
 // [nvn] mirror_for_fast (B2, default off until A/B): the walk over the pool's chunks and spans for a copy buffer (below) runs only while
-// some pool has one (g_have_copies). Every chunk or span with a copy buffer is in g_copies, and g_have_copies is !g_copies.empty(); both
-// change on the render thread, which is the only caller of mirror_for. Read once.
+// some pool has one (g_have_copies). Every chunk or span with a copy buffer is in g_copies, and g_have_copies is !g_copies.empty(). Copy
+// buffers are made only on the render thread (copy_fallback), which sets the flag before it returns and is the only caller of mirror_for;
+// a clear (destroy_chunk, which can also run from deferred destroys or pool teardown) happens only once no copy is left. Read once.
 bool mirror_for_fast() {
     static const bool on = config_get_bool("nvn", "mirror_for_fast", false);
     return on;

@@ -74,6 +74,7 @@ void wake_worker() {
     if (g_q->sleeping.load(std::memory_order_seq_cst)) WakeByAddressSingle(&g_q->pub);
 }
 
+constexpr size_t kRewindAt = size_t{1} << 20;   // [nvn] replay_ring_rewind: rewind only past 1 MB into the ring
 uint64_t g_rewinds = 0;      // [nvn] replay_ring_rewind: pads written (the 10 s line)
 bool g_rewind_due = false;   // producer (render thread): the last sync found the ring empty
 
@@ -83,13 +84,19 @@ uint8_t* q_begin(Exec exec, size_t payload) {
     const size_t total = align16(sizeof(Hdr) + payload);
     if (g_rewind_due) {   // [nvn] replay_ring_rewind: the ring was empty at the last sync; a pad the worker skips takes us to offset 0
         g_rewind_due = false;
+        // Only once the ring has walked far enough (kRewindAt): until the worker steps over the pad, the room left is `at`; a small `at`
+        // made the next submission's first records wait for the worker (thousands of ring-full waits per 10 s in the first A/B). The pad
+        // is published at once, so the worker steps over it while this submission records.
         const size_t at = static_cast<size_t>(q.head % kRingBytes);
-        if (at != 0) {
+        if (at >= kRewindAt) {
             Hdr* p = reinterpret_cast<Hdr*>(q.mem + at);
             p->exec = nullptr;
             p->size = static_cast<uint32_t>(kRingBytes - at);
             q.head += kRingBytes - at;
             ++g_rewinds;
+            q.unpublished = 0;
+            q.pub.store(q.head, std::memory_order_seq_cst);
+            wake_worker();
         }
     }
     uint64_t pos = q.head % kRingBytes;
