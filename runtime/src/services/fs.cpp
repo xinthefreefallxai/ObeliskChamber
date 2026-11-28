@@ -951,6 +951,19 @@ void register_fs() {
     add("fsp-srv", [] { return make_fsp(); });
     NXLOG_I("fs", "fsp-srv: RomFS from '%s', save data in '%s', %zu add-on content(s) in '%s'", romfs_dir().c_str(), save_dir().c_str(),
             installed_aoc().size(), aoc_dir().c_str());
+    // [fs] prescan (C1): the RomFS folder and the RomFS mods' folders are read on a background thread from here on, while the window and
+    // the Vulkan device are made; rom_image() takes the trees (the game opens its RomFS 1.5 to 3 s later). The mods as rom_image() lists
+    // them (mod.ini romfs = on); one it does not ask for is dropped.
+    static const bool prescan = config_get_bool("fs", "prescan", true);
+    if (prescan) {
+        std::vector<std::string> folders{romfs_dir()};
+        for (const ModInfo& m : mods_list())
+            if (m.has_romfs && m.romfs_on) {
+                const std::u8string u = (std::filesystem::u8path(m.dir) / "romfs").u8string();
+                folders.emplace_back(reinterpret_cast<const char*>(u.data()), u.size());
+            }
+        fs::romfs_prescan(folders);
+    }
 }
 
 void fs_reset() {
